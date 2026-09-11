@@ -1,8 +1,8 @@
 //! Port of the C# `Admin.Module` project (namespace `Admin.Modules`).
 //!
-//! Health endpoints are live. Phase 7 adds the 12 read endpoints — customers,
-//! employees, genres, media types — and the Genre `POST` / `PUT` / `DELETE`
-//! trio, the only writes anywhere in the application.
+//! Twelve read endpoints — customers, employees, genres, media types — the
+//! Genre `POST` / `PUT` / `DELETE` trio, which is the only write surface
+//! anywhere in the application, and health plus data-health.
 //!
 //! Administration is the one module that stacks three policies: reads require
 //! `role.admin` **and** `administration.read` **and** `tenant.scoped`; writes
@@ -10,6 +10,9 @@
 //!
 //! Note the name and the prefix disagree — the module reports `Administration`
 //! while mounting at `/api/admin`. That is the original's arrangement.
+
+mod endpoints;
+mod services;
 
 use axum::Router;
 use shared_kernel::{Module, health};
@@ -35,6 +38,6 @@ impl Module<AppState> for AdministrationModule {
     }
 
     fn router(&self) -> Router<AppState> {
-        health::routes(NAME)
+        health::routes(NAME).merge(endpoints::routes())
     }
 }

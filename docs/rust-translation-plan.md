@@ -172,7 +172,13 @@ Four real bugs surfaced from that diff, none of which the test suite would have 
 3. **The invoice-line entity response was missing its two navigation members.** `Invoice` and `Track`, both always null, appear because the C# serializes an entity there.
 4. **The wrong database file was bundled**, as above.
 
-Still open for Phase 8: extending the harness over the Administration routes once Phase 7 lands, and the write surface.
+**V15 — Administration and the write surface were diffed (Phase 7).** The harness now covers **64 routes, all identical**. The Genre write surface was diffed separately, since writes need a database each rather than a shared one: **9 of 10 cases identical** — create, create with a lowercase member name, both validation failures, the forbidden and unauthorized paths, update-missing, update-invalid and delete-missing all match, including the `Location` header and the lowercase `PUT` echo.
+
+The tenth is the `detail` of a malformed-JSON problem, and it is an accepted divergence: the `type`, `title` and `status` match, but the detail is the parser's own diagnostic and the .NET one names its own internals — `Failed to read parameter "CreateGenreRequest request" from the request body as JSON.` Matching it would mean hardcoding a C# type and parameter name into a Rust handler, which is copying another framework's implementation detail for no benefit. The message is a human-readable diagnostic, not a contract.
+
+**F1 was also confirmed end to end.** With both services warmed and then given the same create, the original's collection endpoint still answered 28 genres while this port answered 29 — the stale read its no-op tag invalidation leaves behind, and the reason the fix exists.
+
+Still open for Phase 8: the remaining volatile-field policy is settled and the harness is checked in, so what is left is running it in CI rather than by hand.
 
 ---
 

@@ -10,22 +10,24 @@ preserve-versus-fix decisions that define what "equivalent" means here, is in
 
 ## Status
 
-**Phase 6 of 9 — Music and Orders are live.** 37 of the 47 routes are
-implemented, and **every one of them has been diffed byte-for-byte against the
-running C# original**: `tools/parity-diff.py` reports 45/45 routes identical,
+**Phase 7 of 9 — every route is implemented.** All 47, including the Genre
+write surface, and **every one has been diffed byte-for-byte against the
+running C# original**: `tools/parity-diff.py` reports 64/64 routes identical,
 ignoring only members that cannot match by construction (timestamps, trace
-identifiers, the build's version string, and each host's own signing key).
+identifiers, the build's version string, and each host's own signing key). The
+writes were diffed separately and match on 9 of 10 cases; the tenth is a
+malformed-JSON `detail` string that names .NET internals.
 
 Under it: `shared-kernel` carries the cross-cutting machinery (configuration,
 environment gating, RFC 7807 errors, the cache facade, rate-limit partitioning,
 authorization guards, the module contract, health payloads);
 `shared-persistence` carries the domain (entities, API models, validators,
 repository traits, application state); `shared-data-sqlite` implements all ten
-repositories in sqlx; and Identity issues RS256 tokens whose claims match the
-original's exactly.
+repositories in sqlx; Identity issues RS256 tokens whose claims match the
+original's exactly; and the five modules carry their endpoints.
 
-Next: Administration and its Genre write endpoints in Phase 7. See the phase
-table in the plan.
+Next: the parity harness in CI, a working Dockerfile and the documentation
+pass — Phases 8 and 9. See the phase table in the plan.
 
 ```console
 $ curl -s localhost:5043/api/music/data-health

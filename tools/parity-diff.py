@@ -70,6 +70,19 @@ AUTHENTICATED = [
     "/api/orders/invoice-lines",
     "/api/orders/invoice-lines/invoice/1",
     "/api/orders/invoice-lines/track/1013",
+    "/api/admin/customers/1",
+    "/api/admin/customers",
+    "/api/admin/customers/",
+    "/api/admin/customers/support-rep/3",
+    "/api/admin/employees/1",
+    "/api/admin/employees/2",
+    "/api/admin/employees",
+    "/api/admin/employees/2/direct-reports",
+    "/api/admin/employees/2/reports-to",
+    "/api/admin/genres/1",
+    "/api/admin/genres",
+    "/api/admin/media-types/1",
+    "/api/admin/media-types",
     # Absent ids, to compare the 404 documents.
     "/api/music/albums/999999",
     "/api/music/artists/999999",
@@ -77,10 +90,16 @@ AUTHENTICATED = [
     "/api/music/tracks/999999",
     "/api/orders/invoices/999999",
     "/api/orders/invoice-lines/999999",
+    "/api/admin/customers/999999",
+    "/api/admin/employees/999999",
+    "/api/admin/genres/999999",
+    "/api/admin/media-types/999999",
     # Absent ids on collection routes, which answer 200 with an empty array.
     "/api/music/albums/artist/999999",
     "/api/music/tracks/album/999999",
     "/api/orders/invoices/customer/999999",
+    "/api/admin/customers/support-rep/999999",
+    "/api/admin/employees/999999/direct-reports",
 ]
 
 

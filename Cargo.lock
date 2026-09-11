@@ -1180,6 +1180,7 @@ version = "1.0.0"
 dependencies = [
  "axum",
  "serde",
+ "serde_json",
  "shared-kernel",
  "shared-persistence",
  "tracing",
@@ -1871,6 +1872,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tower",
  "tracing",
 ]
 

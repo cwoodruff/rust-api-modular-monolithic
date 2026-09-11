@@ -17,6 +17,7 @@ pub mod data;
 pub mod environment;
 pub mod errors;
 pub mod health;
+pub mod json;
 pub mod module;
 pub mod traffic_control;
 
@@ -26,4 +27,5 @@ pub use data::{RepositoryError, RepositoryResult};
 pub use environment::Environment;
 pub use errors::ProblemDetails;
 pub use health::{DatabaseProbe, HealthContext, HealthResponse};
+pub use json::JsonBody;
 pub use module::Module;
