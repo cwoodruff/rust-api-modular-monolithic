@@ -28,7 +28,7 @@ use axum::http::{HeaderName, HeaderValue, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
-use shared_kernel::errors::{ProblemDetails, status_code_page_body};
+use shared_kernel::errors::{ProblemDetails, new_trace_id, status_code_page};
 use shared_kernel::traffic_control::{self, PUBLIC_ANON_PERMIT_LIMIT, PUBLIC_ANON_WINDOW};
 
 /// The six headers the original sets on every response, labelled "OWASP A05".
@@ -76,11 +76,12 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 
-/// Port of `UseStatusCodePages()`.
+/// Port of `UseStatusCodePages()` as the host actually configures it.
 ///
-/// Gives a bodiless 4xx or 5xx a `text/plain` body reading
-/// `Status Code: 404; Not Found`. Without this a bare `Results.NotFound()`
-/// would answer with nothing at all, and clients do see the difference.
+/// The middleware's plain-text default is replaced by `AddProblemDetails()`, so
+/// a bodiless 4xx or 5xx comes back as `application/problem+json`. Verified
+/// against the running service — a bare 404, an auth challenge, and a
+/// rate-limit rejection all answer with a problem document.
 pub async fn status_code_pages(request: Request, next: Next) -> Response {
     let response = next.run(request).await;
     let status = response.status();
@@ -92,7 +93,7 @@ pub async fn status_code_pages(request: Request, next: Next) -> Response {
         return response;
     }
 
-    let (mut parts, body) = response.into_parts();
+    let (parts, body) = response.into_parts();
 
     // Only an empty body qualifies; anything already written is left alone.
     let bytes = match axum::body::to_bytes(body, usize::MAX).await {
@@ -104,11 +105,16 @@ pub async fn status_code_pages(request: Request, next: Next) -> Response {
         return (parts, Body::from(bytes)).into_response();
     }
 
-    parts
-        .headers
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    let problem = status_code_page(status, trace_id()).into_response();
+    let (problem_parts, problem_body) = problem.into_parts();
 
-    (parts, Body::from(status_code_page_body(status))).into_response()
+    // Keep the headers the inner layers set — `WWW-Authenticate` on a
+    // challenge, most importantly — and take the problem document's
+    // content type and body.
+    let mut merged = parts;
+    merged.headers.extend(problem_parts.headers);
+
+    (merged, problem_body).into_response()
 }
 
 /// Adds `Strict-Transport-Security`, as `UseHsts()` does outside Development.
@@ -230,16 +236,12 @@ pub fn panic_to_problem(panic: Box<dyn std::any::Any + Send + 'static>) -> Respo
 
 /// A correlation identifier for one response.
 ///
-/// The original uses `HttpContext.TraceIdentifier`, which is Kestrel's
-/// per-request connection-and-request counter. Nothing depends on its format,
-/// only on its presence.
+/// Verified against the running service: every `traceId` on the wire is a W3C
+/// `traceparent`, because `HttpContext.TraceIdentifier` reports the ambient
+/// activity rather than Kestrel's connection counter.
 #[must_use]
 pub fn trace_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    format!("R{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+    new_trace_id()
 }
 
 /// Whether a request arrived over a secure transport.

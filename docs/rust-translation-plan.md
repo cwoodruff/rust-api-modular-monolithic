@@ -137,11 +137,26 @@ The source has documented quirks. Recommended stance: **preserve everything wire
 | F8 | `UseHttpsRedirection()` 307s plain HTTP to HTTPS in-process, with no forwarded-headers configuration — so behind a TLS-terminating proxy it redirect-loops, and it is the reason the original's container cannot serve traffic | HSTS is reproduced; the redirect is left to the edge, which the original's own deployment guide recommends. The probe honors `X-Forwarded-Proto` (Phase 4) |
 | F9 | The `/data-health` handler catches every exception and discards it, so a degraded host reports `connected: false` with nothing to diagnose from | Same answer on the wire, but the failure is logged (Phase 4) |
 
-### Verify empirically during Phase 8 (don't guess)
+### Verified against the running C# service (done in Phase 5)
 
-- **Exact JWT claim names on the wire.** The C# `JwtSecurityTokenHandler` outbound claim-type map may emit `unique_name`/`email`/`role` rather than the full ClaimTypes URIs. Run the .NET app, capture a real token, and pin the Rust claim names (and `/api/identity/userinfo` output) to what's actually emitted.
-- Exact ProblemDetails field order/content for each error class, and the framework's default 429 body.
-- Whether ASP.NET adds any implicit headers we must match (e.g., `WWW-Authenticate` challenge details on 401).
+The .NET 10 SDK turned out to be available, so rather than wait for Phase 8 these were captured from the real service — a seeded `Identity:InMemoryUsers` set, a live login, and curl against every shape. Several answers contradicted what the code alone suggested.
+
+| # | What was verified | Result |
+|---|---|---|
+| V1 | **JWT claim names** | Not the short names. `DefaultInboundClaimTypeMap` is cleared but the **outbound** map is not, so name, email, and role are emitted as the full XML Schema URIs: `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name`, `.../claims/emailaddress`, and `http://schemas.microsoft.com/ws/2008/06/identity/claims/role`. `sub`, `jti`, `iat`, `nbf`, `exp`, `iss`, `tenant`, and `permissions` are plain |
+| V2 | **`aud` is duplicated** | `"aud": ["modular-api", "modular-api"]` — an array, not a string. `JwtSecurityToken`'s constructor adds the audience *and* the claim list already carries one |
+| V3 | **Multi-valued claims collapse** | One role serializes as a string, two or more as an array. Same for `permissions`. A reader must accept both forms |
+| V4 | **`expires_at_utc`** | `2026-09-11T23:09:46.900751+00:00` — a `DateTimeOffset`, so a `+00:00` offset rather than `Z`, and fractional digits with trailing zeros trimmed (0–7), unlike the health endpoints' fixed seven |
+| V5 | **Bodiless 4xx/5xx are ProblemDetails JSON, not text** | `AddProblemDetails()` is registered, so `UseStatusCodePages()` emits `application/problem+json`: `{"type":"https://tools.ietf.org/html/rfc9110#section-15.5.5","title":"Not Found","status":404,"traceId":"…"}`. **This corrects P15**, which assumed the middleware's plain-text default |
+| V6 | **Two different `type` vocabularies** | The default table uses `https://tools.ietf.org/html/rfc9110#…`; the custom exception handler uses `https://www.rfc-editor.org/rfc/rfc9110#…`. Both appear in the same service |
+| V7 | **429 carries no `type`** | `{"title":"Too Many Requests","status":429,"traceId":"…"}` — ASP.NET's defaults table has no entry for 429, so `type` is omitted and `title` falls back to the reason phrase. Still no `Retry-After`, confirming P12 |
+| V8 | **`traceId` is a W3C traceparent** | `00-{32 hex}-{16 hex}-00` in *both* shapes, not the `0HN…` connection id |
+| V9 | **FluentValidation messages** | Confirmed exactly as implemented in Phase 2: `The length of 'Name' must be 120 characters or fewer. You entered 121 characters.` |
+| V10 | **API model member order** | `{"Name":…,"Tracks":[],"Id":1}` — System.Text.Json writes derived members *before* base ones, so `Id` lands last. Semantically irrelevant, and the parity harness compares parsed documents |
+| V11 | **Genre write surface** | `POST` → 201 with `Location: /api/admin/genres/{id}` and a PascalCase model; `PUT` → 200 with lowercase `{"id":…,"name":…}` (confirming P11); `PUT` on a missing id → 404; `DELETE` → 204 |
+| V12 | **Auth flows** | Refresh rotates — reusing a spent refresh token answers 401. Logout with a mismatched `userId` answers 403; with the right one, 204. A 401 from the JWT challenge carries `WWW-Authenticate: Bearer` |
+
+Still open for Phase 8: the full route-by-route body diff, which is what the golden harness is for.
 
 ---
 

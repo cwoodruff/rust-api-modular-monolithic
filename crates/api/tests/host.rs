@@ -368,19 +368,31 @@ async fn every_configured_origin_is_accepted() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn an_unknown_route_gets_the_status_code_pages_body() {
-    // Port of UseStatusCodePages(): a bodiless 4xx comes back as text/plain.
+async fn an_unknown_route_gets_a_problem_document() {
+    // Verified against the running C# service: AddProblemDetails() replaces
+    // the status-code-pages middleware's plain-text default, so a bodiless 404
+    // answers with application/problem+json.
     let app = development_app().await;
 
     let response = get(&app, "/does-not-exist").await;
 
     assert_eq!(response.status, StatusCode::NOT_FOUND);
-    assert_eq!(response.text(), "Status Code: 404; Not Found");
     assert!(
         response
             .header("content-type")
-            .is_some_and(|value| value.starts_with("text/plain"))
+            .is_some_and(|value| value.starts_with("application/problem+json")),
+        "got {:?}",
+        response.header("content-type")
     );
+
+    let document = response.json();
+    assert_eq!(
+        document["type"],
+        "https://tools.ietf.org/html/rfc9110#section-15.5.5"
+    );
+    assert_eq!(document["title"], "Not Found");
+    assert_eq!(document["status"], 404);
+    assert!(document["traceId"].is_string());
 }
 
 #[tokio::test]
@@ -396,7 +408,13 @@ async fn a_wrong_method_also_gets_a_status_code_page() {
     let response = send(&app, request).await;
 
     assert_eq!(response.status, StatusCode::METHOD_NOT_ALLOWED);
-    assert_eq!(response.text(), "Status Code: 405; Method Not Allowed");
+
+    let document = response.json();
+    assert_eq!(
+        document["type"],
+        "https://tools.ietf.org/html/rfc9110#section-15.5.6"
+    );
+    assert_eq!(document["title"], "Method Not Allowed");
 }
 
 #[tokio::test]
@@ -472,6 +490,17 @@ async fn the_sixty_first_request_in_a_window_is_rejected() {
         rejected.header("retry-after").is_none(),
         "the original writes no Retry-After"
     );
+
+    // 429 is absent from ASP.NET's defaults table, so the document carries no
+    // `type` at all and falls back to the reason phrase for its title.
+    let document = rejected.json();
+    assert!(
+        document.get("type").is_none(),
+        "429 should carry no type, got {:?}",
+        document.get("type")
+    );
+    assert_eq!(document["title"], "Too Many Requests");
+    assert_eq!(document["status"], 429);
 }
 
 #[tokio::test]

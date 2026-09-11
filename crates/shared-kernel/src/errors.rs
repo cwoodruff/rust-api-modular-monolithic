@@ -48,8 +48,12 @@ pub const PROBLEM_JSON: &str = "application/problem+json";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProblemDetails {
     /// The problem type URI.
-    #[serde(rename = "type")]
-    pub type_uri: String,
+    ///
+    /// Optional because ASP.NET's defaults table has no entry for some statuses
+    /// — 429 among them — and omits the member entirely rather than sending a
+    /// placeholder.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub type_uri: Option<String>,
 
     /// A short, human-readable summary.
     pub title: String,
@@ -87,7 +91,7 @@ impl ProblemDetails {
     #[must_use]
     pub fn validation(errors: BTreeMap<String, Vec<String>>, trace_id: impl Into<String>) -> Self {
         Self {
-            type_uri: CLIENT_ERROR_TYPE.to_owned(),
+            type_uri: Some(CLIENT_ERROR_TYPE.to_owned()),
             title: VALIDATION_TITLE.to_owned(),
             status: StatusCode::BAD_REQUEST.as_u16(),
             detail: Some(VALIDATION_DETAIL.to_owned()),
@@ -106,7 +110,7 @@ impl ProblemDetails {
         trace_id: impl Into<String>,
     ) -> Self {
         Self {
-            type_uri: CLIENT_ERROR_TYPE.to_owned(),
+            type_uri: Some(CLIENT_ERROR_TYPE.to_owned()),
             title: MALFORMED_REQUEST_TITLE.to_owned(),
             status: status.as_u16(),
             detail: Some(detail.into()),
@@ -120,7 +124,7 @@ impl ProblemDetails {
     #[must_use]
     pub fn internal_server_error(trace_id: impl Into<String>) -> Self {
         Self {
-            type_uri: SERVER_ERROR_TYPE.to_owned(),
+            type_uri: Some(SERVER_ERROR_TYPE.to_owned()),
             title: UNEXPECTED_ERROR_TITLE.to_owned(),
             status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
             detail: None,
@@ -185,19 +189,99 @@ where
     grouped
 }
 
-/// Port of the body `UseStatusCodePages()` writes.
+/// Port of what `UseStatusCodePages()` writes for a bodiless 4xx or 5xx.
 ///
-/// The host installs the status-code-pages middleware, so a response that
-/// carries a status in the 400–599 range and *no* body — a bare 404 from
-/// `Results.NotFound()`, or a 401 from the authentication challenge — comes
-/// back as `text/plain` reading `Status Code: 404; Not Found`. Clients see it,
-/// so the port reproduces it rather than returning a genuinely empty body.
+/// The middleware's own default is plain text — `Status Code: 404; Not Found` —
+/// but the host also calls `AddProblemDetails()`, which replaces that with a
+/// problem document. Verified against the running service: a bare
+/// `Results.NotFound()`, an auth challenge, and a rate-limit rejection all come
+/// back as `application/problem+json`.
+///
+/// Note the `type` vocabulary differs from the custom exception handler's. This
+/// table uses `tools.ietf.org`; [`CLIENT_ERROR_TYPE`] and [`SERVER_ERROR_TYPE`]
+/// use `www.rfc-editor.org`. Both appear in the same service.
 #[must_use]
-pub fn status_code_page_body(status: StatusCode) -> String {
-    match status.canonical_reason() {
-        Some(reason) => format!("Status Code: {}; {reason}", status.as_u16()),
-        None => format!("Status Code: {}", status.as_u16()),
+pub fn status_code_page(status: StatusCode, trace_id: impl Into<String>) -> ProblemDetails {
+    let (type_uri, title) = problem_defaults(status);
+
+    ProblemDetails {
+        type_uri: type_uri.map(ToOwned::to_owned),
+        title: title.to_owned(),
+        status: status.as_u16(),
+        detail: None,
+        instance: None,
+        errors: None,
+        trace_id: trace_id.into(),
     }
+}
+
+/// ASP.NET Core's `ProblemDetailsDefaults` table.
+///
+/// A status in the table gets its `type` and a fixed `title`. Anything else —
+/// 429 among them — gets **no `type` at all** and falls back to the reason
+/// phrase for its title.
+fn problem_defaults(status: StatusCode) -> (Option<&'static str>, &'static str) {
+    let entry = match status.as_u16() {
+        400 => Some(("#section-15.5.1", "Bad Request")),
+        401 => Some(("#section-15.5.2", "Unauthorized")),
+        403 => Some(("#section-15.5.4", "Forbidden")),
+        404 => Some(("#section-15.5.5", "Not Found")),
+        405 => Some(("#section-15.5.6", "Method Not Allowed")),
+        406 => Some(("#section-15.5.7", "Not Acceptable")),
+        409 => Some(("#section-15.5.10", "Conflict")),
+        415 => Some(("#section-15.5.16", "Unsupported Media Type")),
+        422 => Some(("#section-15.5.21", "Unprocessable Entity")),
+        426 => Some(("#section-15.5.22", "Upgrade Required")),
+        500 => Some((
+            "#section-15.6.1",
+            "An error occurred while processing your request.",
+        )),
+        _ => None,
+    };
+
+    match entry {
+        Some((fragment, title)) => (Some(default_type_for(fragment)), title),
+        None => (None, status.canonical_reason().unwrap_or("Error")),
+    }
+}
+
+/// Resolves a fragment against the default table's base URI.
+fn default_type_for(fragment: &str) -> &'static str {
+    // `const` rather than `format!` so the returned reference is 'static; the
+    // set is closed and small.
+    match fragment {
+        "#section-15.5.1" => "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+        "#section-15.5.2" => "https://tools.ietf.org/html/rfc9110#section-15.5.2",
+        "#section-15.5.4" => "https://tools.ietf.org/html/rfc9110#section-15.5.4",
+        "#section-15.5.5" => "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+        "#section-15.5.6" => "https://tools.ietf.org/html/rfc9110#section-15.5.6",
+        "#section-15.5.7" => "https://tools.ietf.org/html/rfc9110#section-15.5.7",
+        "#section-15.5.10" => "https://tools.ietf.org/html/rfc9110#section-15.5.10",
+        "#section-15.5.16" => "https://tools.ietf.org/html/rfc9110#section-15.5.16",
+        "#section-15.5.21" => "https://tools.ietf.org/html/rfc9110#section-15.5.21",
+        "#section-15.5.22" => "https://tools.ietf.org/html/rfc9110#section-15.5.22",
+        _ => "https://tools.ietf.org/html/rfc9110#section-15.6.1",
+    }
+}
+
+/// Builds a W3C `traceparent`-shaped identifier.
+///
+/// ASP.NET's `HttpContext.TraceIdentifier` reports the ambient activity, so
+/// every `traceId` on the wire reads `00-{32 hex}-{16 hex}-00`. Nothing depends
+/// on the value; matching the shape keeps responses recognizable.
+#[must_use]
+pub fn new_trace_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let seed = sequence
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .rotate_left(31)
+        .wrapping_add(0x1234_5678_9ABC_DEF0);
+
+    format!("00-{sequence:016x}{seed:016x}-{seed:016x}-00")
 }
 
 #[cfg(test)]
@@ -276,15 +360,80 @@ mod tests {
         assert_eq!(errors[""], vec!["something went wrong"]);
     }
 
+    /// Captured from the running C# service, which is the only reason these
+    /// are known: the middleware's documented default is plain text, and
+    /// `AddProblemDetails()` silently replaces it.
     #[test]
-    fn status_code_pages_body_matches_the_middleware() {
+    fn status_code_pages_match_the_documents_the_service_returns() {
         assert_eq!(
-            status_code_page_body(StatusCode::NOT_FOUND),
-            "Status Code: 404; Not Found"
+            to_json(&status_code_page(StatusCode::NOT_FOUND, "trace-1")),
+            serde_json::json!({
+                "type": "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+                "title": "Not Found",
+                "status": 404,
+                "traceId": "trace-1"
+            })
+        );
+
+        assert_eq!(
+            to_json(&status_code_page(StatusCode::UNAUTHORIZED, "trace-2")),
+            serde_json::json!({
+                "type": "https://tools.ietf.org/html/rfc9110#section-15.5.2",
+                "title": "Unauthorized",
+                "status": 401,
+                "traceId": "trace-2"
+            })
+        );
+
+        assert_eq!(
+            to_json(&status_code_page(StatusCode::FORBIDDEN, "trace-3"))["type"],
+            "https://tools.ietf.org/html/rfc9110#section-15.5.4"
+        );
+    }
+
+    #[test]
+    fn a_status_outside_the_defaults_table_carries_no_type() {
+        // 429 has no entry, so the document omits `type` entirely and takes its
+        // title from the reason phrase.
+        let document = to_json(&status_code_page(StatusCode::TOO_MANY_REQUESTS, "trace-4"));
+
+        assert_eq!(
+            document,
+            serde_json::json!({
+                "title": "Too Many Requests",
+                "status": 429,
+                "traceId": "trace-4"
+            })
+        );
+    }
+
+    #[test]
+    fn the_two_type_vocabularies_stay_distinct() {
+        // The defaults table uses tools.ietf.org; the custom exception handler
+        // uses www.rfc-editor.org. Both appear in the same service.
+        let from_table = to_json(&status_code_page(StatusCode::BAD_REQUEST, "trace-5"));
+        let from_handler = to_json(&ProblemDetails::validation(BTreeMap::new(), "trace-6"));
+
+        assert_eq!(
+            from_table["type"],
+            "https://tools.ietf.org/html/rfc9110#section-15.5.1"
         );
         assert_eq!(
-            status_code_page_body(StatusCode::UNAUTHORIZED),
-            "Status Code: 401; Unauthorized"
+            from_handler["type"],
+            "https://www.rfc-editor.org/rfc/rfc9110#section-15.5.1"
         );
+    }
+
+    #[test]
+    fn trace_identifiers_look_like_w3c_traceparents() {
+        let trace = new_trace_id();
+        let segments: Vec<&str> = trace.split('-').collect();
+
+        assert_eq!(segments.len(), 4, "{trace}");
+        assert_eq!(segments[0], "00");
+        assert_eq!(segments[1].len(), 32, "{trace}");
+        assert_eq!(segments[2].len(), 16, "{trace}");
+        assert_eq!(segments[3], "00");
+        assert_ne!(new_trace_id(), new_trace_id());
     }
 }
