@@ -1,11 +1,12 @@
 //! Port of the C# `ModularMonolith.Api` host.
 //!
-//! Phase 0 scaffold: the composition root exists and knows every module, but
-//! the axum router, middleware stack, and database pool land in Phase 4. Run it
-//! to confirm the workspace is wired and the bundled Chinook database is where
-//! the host will look for it.
+//! The composition root exists and knows every module, and it resolves the
+//! database the way the real host will. The axum router, middleware stack, and
+//! connection pool land in Phase 4.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use shared_persistence::database;
 
 /// The module registry, mirroring the hard-coded `GetModules()` list in
 /// `Program.cs`. Order is the original's: Administration, Identity, Music,
@@ -18,42 +19,26 @@ const MODULES: [(&str, &str); 5] = [
     (module_reporting::NAME, module_reporting::PREFIX),
 ];
 
-/// Locates the bundled database the way Phase 2's full probe will: start at the
-/// working directory and walk upward looking for `data/chinook.db`, accepting
-/// only a file with content.
-fn find_bundled_database(start: &Path) -> Option<PathBuf> {
-    let mut current = Some(start);
-
-    while let Some(directory) = current {
-        let candidate = directory.join(shared_persistence::BUNDLED_DATABASE_PATH);
-        if candidate.metadata().is_ok_and(|file| file.len() > 0) {
-            return Some(candidate);
-        }
-        current = directory.parent();
-    }
-
-    None
-}
-
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    println!("Modular Monolith API — Rust port (Phase 0 scaffold)\n");
+    println!("Modular Monolith API — Rust port (Phase 2)\n");
 
     println!("Modules registered:");
     for (name, prefix) in MODULES {
         println!("  {name:<16} {prefix}");
     }
 
+    // Phase 4 will read the configured connection string here; until then the
+    // probe runs with nothing configured, which is the path the original falls
+    // back to anyway.
     let working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match find_bundled_database(&working_directory) {
-        Some(path) => println!("\nChinook database: {}", path.display()),
-        None => println!(
-            "\nChinook database: not found (expected {} at or above {})",
-            shared_persistence::BUNDLED_DATABASE_PATH,
-            working_directory.display()
-        ),
+    let resolved = database::resolve_database_path(None, &working_directory);
+
+    println!("\nChinook database: {}", resolved.display());
+    if !database::has_usable_database(&resolved) {
+        println!("  (not found — the host would create the directory and open an empty file)");
     }
 
     println!("\nThe HTTP host lands in Phase 4; see docs/rust-translation-plan.md.");
@@ -81,11 +66,15 @@ mod tests {
 
     #[test]
     fn bundled_database_ships_with_the_repository() {
-        let crate_directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crate_directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let resolved = database::resolve_database_path(None, crate_directory);
 
         assert!(
-            find_bundled_database(crate_directory).is_some(),
-            "data/chinook.db should be bundled in the repository, as it is in the C# original"
+            database::has_usable_database(&resolved),
+            "data/chinook.db should be bundled in the repository, as it is in the C# original; \
+             resolved to {}",
+            resolved.display()
         );
     }
 }

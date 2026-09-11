@@ -41,10 +41,10 @@ sqlx = { version = "0.8", default-features = false, features = [
     "macros",
 ] }
 chrono = { version = "0.4", features = ["serde"] }
-# Serialization mode is deliberately left at the default here: C# emits decimals
-# as JSON numbers (0.99), and Phase 2 picks the feature that reproduces that
-# exactly. See the decimal-formatting risk in docs/rust-translation-plan.md.
-rust_decimal = { version = "1", features = ["serde"] }
+# `serde-float` makes Decimal serialize as a JSON number, which is what
+# System.Text.Json does with C#'s decimal: `0.99`, not `"0.99"`. Decimal rather
+# than f64 keeps the money comparisons in the validators exact.
+rust_decimal = { version = "1", features = ["serde", "serde-float"] }
 
 # --- identity --------------------------------------------------------------
 jsonwebtoken = "9"

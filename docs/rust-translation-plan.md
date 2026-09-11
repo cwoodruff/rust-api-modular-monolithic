@@ -236,7 +236,7 @@ Cache/rate-limit behavior tests (port of `CachingBehaviorTests`, `RateLimitingTe
 ## 10. Risks & watch items
 
 - **Serde casing drift** is the most likely source of silent incompatibility — the mixed PascalCase/lowercase/snake_case contract (P1) needs per-payload `rename` discipline and is exactly what the golden-diff suite exists to catch.
-- **Decimal/date formatting:** C# serializes `decimal` as JSON numbers (`0.99`) and `DateTime` as ISO-8601 without offset; `rust_decimal` + `chrono` must be configured to match (no trailing-zero or `Z`-suffix drift).
+- ~~**Decimal/date formatting:**~~ **Settled in Phase 2.** Money uses `rust_decimal` with the `serde-float` feature, so a `Decimal` serializes as a bare JSON number the way `System.Text.Json` writes C#'s `decimal`; dates use `chrono::NaiveDateTime`, whose default format matches the offset-free ISO-8601 the original emits. Both money columns are stored as SQLite `real`, so values arrive as `f64` — a test pins all 37 distinct `Invoice.Total` and `Track.UnitPrice` values in the bundled database through `f64` → `Decimal` → JSON to catch any `10.899999999999999` tail.
 - **JWT claim-name uncertainty** (outbound claim-type mapping) — resolved empirically, not by reading code (§4).
 - **SQLite concurrency:** EF pooled 128 connections; sqlx SQLite writes serialize on a single writer. Fine for this read-heavy API, but enable WAL and keep the write pool small.
 - **The unanchored phone regex and US-only ZIP regex** will reject some legitimate Chinook seed values if ever validated on read — the source only validates on write, so keep validation write-only.
