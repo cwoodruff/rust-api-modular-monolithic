@@ -32,10 +32,12 @@
 //! and that is worth keeping.
 
 pub mod pool;
+pub mod probe;
 pub mod repositories;
 mod rows;
 
 pub use pool::{MAX_POOL_CONNECTIONS, create_pool};
+pub use probe::SqliteDatabaseProbe;
 pub use repositories::{
     SqliteAlbumRepository, SqliteArtistRepository, SqliteCustomerRepository,
     SqliteEmployeeRepository, SqliteGenreRepository, SqliteInvoiceLineRepository,

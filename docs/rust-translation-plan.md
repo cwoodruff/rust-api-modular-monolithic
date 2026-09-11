@@ -134,6 +134,8 @@ The source has documented quirks. Recommended stance: **preserve everything wire
 | F5 | `Produces(404)` declared on collection endpoints that always return 200 | Document 404 only on by-id routes in the OpenAPI spec |
 | F6 | Committed dev RSA private key | Generate on first run; keep the file **gitignored**; loader stays format-compatible |
 | F7 | Single-flight is best-effort: `CompositeCacheFacade` removes each per-key semaphore from its dictionary in the same `finally` that releases it, so concurrent callers can wait on different semaphore instances and more than one runs the factory | Coalescing is handled by the cache itself and is strict. Only ever reduces duplicate work (found in Phase 1) |
+| F8 | `UseHttpsRedirection()` 307s plain HTTP to HTTPS in-process, with no forwarded-headers configuration — so behind a TLS-terminating proxy it redirect-loops, and it is the reason the original's container cannot serve traffic | HSTS is reproduced; the redirect is left to the edge, which the original's own deployment guide recommends. The probe honors `X-Forwarded-Proto` (Phase 4) |
+| F9 | The `/data-health` handler catches every exception and discards it, so a degraded host reports `connected: false` with nothing to diagnose from | Same answer on the wire, but the failure is logged (Phase 4) |
 
 ### Verify empirically during Phase 8 (don't guess)
 

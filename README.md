@@ -10,16 +10,26 @@ preserve-versus-fix decisions that define what "equivalent" means here, is in
 
 ## Status
 
-**Phase 3 of 9 — data access.** The workspace, crate boundaries, architecture
-tests, and CI are in place; `shared-kernel` carries the cross-cutting machinery
-(configuration, environment gating, RFC 7807 errors, the cache facade,
-rate-limit partitioning, the module contract); `shared-persistence` carries the
-domain (entities, API models, validators, repository traits, database probe);
-and `shared-data-sqlite` now implements all ten repositories in sqlx, verified
-against the real Chinook database.
+**Phase 4 of 9 — the host serves HTTP.** `cargo run -p api` now starts a real
+server on port 5043 with the middleware pipeline in the original's order, the
+root endpoint, and `/health` plus `/data-health` for all five modules.
 
-Next: the HTTP host in Phase 4, then the modules. See the phase table in the
-plan.
+Under it: `shared-kernel` carries the cross-cutting machinery (configuration,
+environment gating, RFC 7807 errors, the cache facade, rate-limit partitioning,
+the module contract, health payloads); `shared-persistence` carries the domain
+(entities, API models, validators, repository traits, application state); and
+`shared-data-sqlite` implements all ten repositories in sqlx against the real
+Chinook database.
+
+Next: the Identity module in Phase 5, then the business endpoints. See the
+phase table in the plan.
+
+```console
+$ curl -s localhost:5043/api/music/data-health
+{"module":"Music","status":"Data-Healthy","timestampUtc":"2026-09-11T18:14:33.6630810Z",
+ "environment":"Development","version":"1.0.0","service":"ModularMonolith.Api",
+ "database":{"connected":true}}
+```
 
 ## Layout
 
@@ -49,8 +59,15 @@ a concrete database driver.
 ```sh
 cargo build --workspace
 cargo test --workspace
-cargo run -p api
+
+# Serves on http://localhost:5043. Run it from the repository root so the
+# host finds appsettings.json and data/chinook.db.
+ASPNETCORE_ENVIRONMENT=Development cargo run -p api
 ```
+
+In `Development` or `Demo` the OpenAPI document is served at
+`/swagger/v1/swagger.json`; outside them that path answers 404, as it does in
+the original.
 
 Lint and format the way CI does:
 

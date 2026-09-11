@@ -25,8 +25,14 @@ module-reporting = { path = "crates/module-reporting" }
 # --- host / HTTP -----------------------------------------------------------
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "set-header", "normalize-path", "trace"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = [
+    "catch-panic",
+    "cors",
+    "normalize-path",
+    "set-header",
+    "trace",
+] }
 hyper = "1"
 
 # --- serialization ---------------------------------------------------------

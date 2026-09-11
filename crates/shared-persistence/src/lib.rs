@@ -10,17 +10,20 @@
 //! - [`validation`] — the ten validators, with FluentValidation's semantics.
 //! - [`repositories`] — one trait per entity.
 //! - [`database`] — locating the bundled Chinook file.
+//! - [`state`] — the application state the host builds and every handler reads.
 
 pub mod api_models;
 pub mod convert;
 pub mod database;
 pub mod entities;
 pub mod repositories;
+pub mod state;
 pub mod validation;
 
 pub use convert::Convert;
 pub use database::{CONNECTION_KEY, CONNECTION_NAME, resolve_database_path};
 pub use repositories::{RepositoryError, RepositoryResult};
+pub use state::{AppState, Repositories};
 pub use validation::{Validate, ValidationFailure};
 
 /// The connection-string key the original binds, kept so an existing

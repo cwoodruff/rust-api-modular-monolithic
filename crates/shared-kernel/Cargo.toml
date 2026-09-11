@@ -11,7 +11,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 axum = { workspace = true }
+chrono = { workspace = true }
 dashmap = { workspace = true }
 figment = { workspace = true }
 moka = { workspace = true }

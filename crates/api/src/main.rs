@@ -1,80 +1,60 @@
-//! Port of the C# `ModularMonolith.Api` host.
-//!
-//! The composition root exists and knows every module, and it resolves the
-//! database the way the real host will. The axum router, middleware stack, and
-//! connection pool land in Phase 4.
+//! The host binary.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use shared_persistence::database;
-
-/// The module registry, mirroring the hard-coded `GetModules()` list in
-/// `Program.cs`. Order is the original's: Administration, Identity, Music,
-/// Orders, Reporting.
-const MODULES: [(&str, &str); 5] = [
-    (module_admin::NAME, module_admin::PREFIX),
-    (module_identity::NAME, module_identity::PREFIX),
-    (module_music::NAME, module_music::PREFIX),
-    (module_orders::NAME, module_orders::PREFIX),
-    (module_reporting::NAME, module_reporting::PREFIX),
-];
+use anyhow::Context;
+use api::{DEFAULT_HTTP_PORT, build, build_state, load_config};
 
 #[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt::init();
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,tower_http=warn".into()),
+        )
+        .init();
 
-    println!("Modular Monolith API — Rust port (Phase 2)\n");
+    let content_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    println!("Modules registered:");
-    for (name, prefix) in MODULES {
-        println!("  {name:<16} {prefix}");
+    let config = load_config(&content_root)?;
+    let environment = config.environment().clone();
+    let port = config
+        .get_string("Port")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_HTTP_PORT);
+
+    let state = build_state(config, &content_root).await?;
+    let app = build(state);
+
+    let address = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("failed to bind {address}"))?;
+
+    tracing::info!(%address, environment = environment.name(), "listening");
+    if environment.exposes_operational_metadata() {
+        tracing::info!("OpenAPI document at http://localhost:{port}/swagger/v1/swagger.json");
     }
 
-    // Phase 4 will read the configured connection string here; until then the
-    // probe runs with nothing configured, which is the path the original falls
-    // back to anyway.
-    let working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let resolved = database::resolve_database_path(None, &working_directory);
+    // `into_make_service_with_connect_info` is what gives the rate limiter a
+    // client address to partition on.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("the server stopped unexpectedly")?;
 
-    println!("\nChinook database: {}", resolved.display());
-    if !database::has_usable_database(&resolved) {
-        println!("  (not found — the host would create the directory and open an empty file)");
-    }
-
-    println!("\nThe HTTP host lands in Phase 4; see docs/rust-translation-plan.md.");
+    Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn module_registry_matches_the_original_prefixes() {
-        let prefixes: Vec<&str> = MODULES.iter().map(|(_, prefix)| *prefix).collect();
-
-        assert_eq!(
-            prefixes,
-            vec![
-                "/api/admin",
-                "/api/identity",
-                "/api/music",
-                "/api/orders",
-                "/api/reporting"
-            ]
-        );
+/// Stops on Ctrl-C, so a container stop is not a kill.
+async fn shutdown_signal() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::error!(%error, "could not listen for the shutdown signal");
     }
 
-    #[test]
-    fn bundled_database_ships_with_the_repository() {
-        let crate_directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-
-        let resolved = database::resolve_database_path(None, crate_directory);
-
-        assert!(
-            database::has_usable_database(&resolved),
-            "data/chinook.db should be bundled in the repository, as it is in the C# original; \
-             resolved to {}",
-            resolved.display()
-        );
-    }
+    tracing::info!("shutting down");
 }

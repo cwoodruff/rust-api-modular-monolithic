@@ -14,10 +14,12 @@ pub mod caching;
 pub mod config;
 pub mod environment;
 pub mod errors;
+pub mod health;
 pub mod module;
 pub mod traffic_control;
 
 pub use config::AppConfig;
 pub use environment::Environment;
 pub use errors::ProblemDetails;
+pub use health::{DatabaseProbe, HealthContext, HealthResponse};
 pub use module::Module;
