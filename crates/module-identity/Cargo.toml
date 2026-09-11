@@ -17,10 +17,16 @@ shared-persistence = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
+dashmap = { workspace = true }
 jsonwebtoken = { workspace = true }
 rand = { workspace = true }
 rsa = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+figment = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

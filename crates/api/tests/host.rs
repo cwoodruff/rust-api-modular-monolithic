@@ -14,6 +14,19 @@ use serde_json::Value;
 use shared_kernel::Environment;
 use tower::ServiceExt;
 
+/// Key material generated per test, so no signing key is written into the
+/// working tree and a Production host can be built at all — the real provider
+/// refuses to run outside Development and Demo, as the original refuses.
+fn test_identity(
+    config: &shared_kernel::AppConfig,
+) -> std::sync::Arc<module_identity::IdentityRuntime> {
+    let keys: std::sync::Arc<dyn module_identity::KeyMaterial> = std::sync::Arc::new(
+        module_identity::DevKeyMaterial::generate().expect("a key should generate"),
+    );
+
+    std::sync::Arc::new(module_identity::IdentityRuntime::with_keys(config, keys))
+}
+
 /// The repository root, which is the host's content root.
 fn content_root() -> PathBuf {
     let mut current = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -31,11 +44,14 @@ fn content_root() -> PathBuf {
 /// Builds the application for one environment.
 async fn app_for(environment: Environment) -> Router {
     let root = content_root();
-    let state = api::build_state_for(&root, environment)
+    let config =
+        shared_kernel::AppConfig::load_for(&root, environment).expect("configuration should load");
+    let identity = test_identity(&config);
+    let state = api::build_state(config, &root)
         .await
         .expect("the application state should build");
 
-    api::build(state)
+    api::build(state, identity)
 }
 
 async fn development_app() -> Router {

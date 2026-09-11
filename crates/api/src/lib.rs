@@ -12,6 +12,7 @@ pub mod openapi;
 pub mod routes;
 
 pub use app::build;
+pub use composition::build_identity;
 pub use composition::{build_state, build_state_for, load_config};
 
 /// The port the original's `launchSettings.json` serves HTTP on.

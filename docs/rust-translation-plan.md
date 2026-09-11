@@ -156,6 +156,13 @@ The .NET 10 SDK turned out to be available, so rather than wait for Phase 8 thes
 | V11 | **Genre write surface** | `POST` → 201 with `Location: /api/admin/genres/{id}` and a PascalCase model; `PUT` → 200 with lowercase `{"id":…,"name":…}` (confirming P11); `PUT` on a missing id → 404; `DELETE` → 204 |
 | V12 | **Auth flows** | Refresh rotates — reusing a spent refresh token answers 401. Logout with a mismatched `userId` answers 403; with the right one, 204. A 401 from the JWT challenge carries `WWW-Authenticate: Bearer` |
 
+**V13 — the port was then checked against that capture.** Phase 5's Rust host was run with the same seeded login and its token diffed against the C# one: every claim key matches, including the three URI-named ones; every stable claim value matches; the lifetime is 900 seconds on both; the envelope keys and the `expires_at_utc` format match; and both refresh tokens are 88 characters. The only differences are the deliberately volatile claims (`jti`, `iat`, `nbf`, `exp`).
+
+Two bugs surfaced only by running it, neither caught by the test suite:
+
+- **Environment-variable arrays did not bind.** `Identity__InMemoryUsers__0__Username` splits into a map keyed `"0"`, which will not deserialize into a `Vec`, so the host started with no logins and rejected every password. ASP.NET's binder rewrites an index-keyed map as an array; the config loader now does too. This is the form the original's own documentation uses for seeding logins, so it would have bitten any real deployment.
+- **`traceId` was degenerate.** Both halves were derived from a counter, so the span was identical on every response and the trace was mostly zeroes. The test only checked segment lengths and passed happily; it now checks that the values actually vary.
+
 Still open for Phase 8: the full route-by-route body diff, which is what the golden harness is for.
 
 ---

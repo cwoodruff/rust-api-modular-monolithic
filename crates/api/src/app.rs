@@ -1,7 +1,10 @@
 //! Composition: the module registry, the router, and the middleware stack.
 
+use std::sync::Arc;
+
 use axum::http::{HeaderValue, Method, header};
 use axum::{Router, middleware};
+use module_identity::IdentityRuntime;
 use shared_kernel::module::{Module, mount_all};
 use shared_persistence::AppState;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -17,10 +20,10 @@ use crate::{middleware as own, routes};
 /// array, so adding a module means editing this function. Order is the
 /// original's — Administration, Identity, Music, Orders, Reporting.
 #[must_use]
-pub fn registry() -> Vec<Box<dyn Module<AppState>>> {
+pub fn registry(identity: Arc<IdentityRuntime>) -> Vec<Box<dyn Module<AppState>>> {
     vec![
         Box::new(module_admin::AdministrationModule),
-        Box::new(module_identity::IdentityModule),
+        Box::new(module_identity::IdentityModule::new(identity)),
         Box::new(module_music::MusicModule),
         Box::new(module_orders::OrdersModule),
         Box::new(module_reporting::ReportingModule),
@@ -30,10 +33,14 @@ pub fn registry() -> Vec<Box<dyn Module<AppState>>> {
 /// The registered modules as `(name, prefix)` pairs.
 #[must_use]
 pub fn modules() -> Vec<(&'static str, &'static str)> {
-    registry()
-        .iter()
-        .map(|module| (module.name(), module.prefix()))
-        .collect()
+    [
+        (module_admin::NAME, module_admin::PREFIX),
+        (module_identity::NAME, module_identity::PREFIX),
+        (module_music::NAME, module_music::PREFIX),
+        (module_orders::NAME, module_orders::PREFIX),
+        (module_reporting::NAME, module_reporting::PREFIX),
+    ]
+    .to_vec()
 }
 
 /// Builds the application.
@@ -41,16 +48,21 @@ pub fn modules() -> Vec<(&'static str, &'static str)> {
 /// Layers are applied bottom-up: the last one added runs first, so this reads
 /// in reverse of the original's `Program.cs`. The comments name each one's
 /// counterpart.
-pub fn build(state: AppState) -> Router {
+pub fn build(state: AppState, identity: Arc<IdentityRuntime>) -> Router {
     let secure_transport = !state.environment.is_development();
 
-    let router = mount_all(routes::root().merge(routes::swagger(&state)), &registry());
+    let router = mount_all(
+        routes::root().merge(routes::swagger(&state)),
+        &registry(Arc::clone(&identity)),
+    );
 
     let mut app = router
-        // UseIdentityAuth() sits here. Phase 5 fills it in; until then every
-        // endpoint is anonymous, which for health endpoints is also the final
-        // answer.
-        //
+        // UseIdentityAuth(). It only *populates* the principal — endpoints stay
+        // anonymous unless they opt in, as they do in the original.
+        .layer(middleware::from_fn_with_state(
+            identity,
+            module_identity::authenticate,
+        ))
         // UseRateLimiter()
         .layer(middleware::from_fn_with_state(
             RateLimiter::default(),

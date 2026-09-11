@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use figment::Figment;
-use figment::providers::{Env, Serialized};
+use figment::providers::Serialized;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -88,9 +88,7 @@ impl AppConfig {
             }
         }
 
-        // `split("__")` turns CONNECTIONSTRINGS__APPDATABASE into the nested key
-        // `connectionstrings.appdatabase`, matching the C# provider.
-        figment = figment.merge(Env::raw().split("__"));
+        figment = figment.merge(Serialized::defaults(environment_layer(std::env::vars())));
 
         Ok(Self {
             figment,
@@ -212,6 +210,112 @@ fn read_json_layer(path: &Path) -> Result<Option<Value>, ConfigError> {
     Ok(Some(lowercase_keys(value)))
 }
 
+/// Builds the environment-variable layer.
+///
+/// The C# provider splits a name on `__` to express nesting, and expresses
+/// *array elements* with numeric segments — which is how the original's own
+/// documentation tells you to seed logins:
+///
+/// ```text
+/// Identity__InMemoryUsers__0__Username=demo
+/// Identity__InMemoryUsers__0__Permissions__0=music.read
+/// ```
+///
+/// Splitting alone is not enough: that produces a map keyed `"0"`, which will
+/// not deserialize into a `Vec`. Any map whose keys are exactly the indices
+/// `0..n` is therefore rewritten as an array, which is the rule ASP.NET's
+/// binder applies. Without this the variables bind silently to nothing and the
+/// host starts with no logins at all — found by running it.
+fn environment_layer(variables: impl Iterator<Item = (String, String)>) -> Value {
+    let mut root = serde_json::Map::new();
+
+    for (name, value) in variables {
+        let path: Vec<String> = name.split("__").map(str::to_lowercase).collect();
+        insert_at(&mut root, &path, Value::String(value));
+    }
+
+    numeric_maps_to_arrays(Value::Object(root))
+}
+
+/// Writes `value` at `path`, creating intermediate maps.
+fn insert_at(root: &mut serde_json::Map<String, Value>, path: &[String], value: Value) {
+    let Some((head, rest)) = path.split_first() else {
+        return;
+    };
+
+    if rest.is_empty() {
+        root.insert(head.clone(), value);
+        return;
+    }
+
+    let child = root
+        .entry(head.clone())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+
+    // A scalar already sitting here is replaced: a deeper variable wins over a
+    // shallower one, and neither is useful as a prefix of the other.
+    if !child.is_object() {
+        *child = Value::Object(serde_json::Map::new());
+    }
+
+    if let Value::Object(map) = child {
+        insert_at(map, rest, value);
+    }
+}
+
+/// Rewrites index-keyed maps as arrays, depth first.
+fn numeric_maps_to_arrays(value: Value) -> Value {
+    match value {
+        Value::Object(entries) => {
+            let converted: serde_json::Map<String, Value> = entries
+                .into_iter()
+                .map(|(key, nested)| (key, numeric_maps_to_arrays(nested)))
+                .collect();
+
+            if let Some(items) = as_index_sequence(&converted) {
+                Value::Array(items)
+            } else {
+                Value::Object(converted)
+            }
+        }
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(numeric_maps_to_arrays).collect())
+        }
+        scalar => scalar,
+    }
+}
+
+/// Reads a map as `0..n` if its keys are exactly those indices.
+fn as_index_sequence(entries: &serde_json::Map<String, Value>) -> Option<Vec<Value>> {
+    if entries.is_empty() {
+        return None;
+    }
+
+    let mut indexed: Vec<(usize, &Value)> = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        indexed.push((key.parse::<usize>().ok()?, value));
+    }
+
+    indexed.sort_by_key(|(index, _)| *index);
+
+    // Only a dense run starting at zero is an array; anything else is a map
+    // that happens to use numeric keys.
+    if indexed
+        .iter()
+        .enumerate()
+        .any(|(position, (index, _))| position != *index)
+    {
+        return None;
+    }
+
+    Some(
+        indexed
+            .into_iter()
+            .map(|(_, value)| value.clone())
+            .collect(),
+    )
+}
+
 /// Recursively lowercases object keys, leaving values untouched.
 fn lowercase_keys(value: Value) -> Value {
     match value {
@@ -322,6 +426,101 @@ mod tests {
         let config = config_from(json!({}), Environment::Production);
 
         assert_eq!(config.section_or_default::<Jwt>("Jwt"), Jwt::default());
+    }
+
+    #[test]
+    fn environment_variables_nest_on_the_double_underscore() {
+        let layer = environment_layer(
+            [(
+                "CONNECTIONSTRINGS__APPDATABASE".to_owned(),
+                "Data Source=/tmp/x.db".to_owned(),
+            )]
+            .into_iter(),
+        );
+
+        assert_eq!(
+            layer["connectionstrings"]["appdatabase"],
+            json!("Data Source=/tmp/x.db")
+        );
+    }
+
+    #[test]
+    fn index_segments_become_arrays_so_lists_actually_bind() {
+        // The form the original documents for seeding logins. Splitting alone
+        // yields a map keyed "0", which will not deserialize into a Vec — the
+        // host then starts with no logins and every password is rejected.
+        let layer = environment_layer(
+            [
+                (
+                    "Identity__InMemoryUsers__0__Username".to_owned(),
+                    "demo".to_owned(),
+                ),
+                (
+                    "Identity__InMemoryUsers__0__Password".to_owned(),
+                    "secret".to_owned(),
+                ),
+                (
+                    "Identity__InMemoryUsers__0__Permissions__0".to_owned(),
+                    "music.read".to_owned(),
+                ),
+                (
+                    "Identity__InMemoryUsers__0__Permissions__1".to_owned(),
+                    "orders.read".to_owned(),
+                ),
+                (
+                    "Identity__InMemoryUsers__1__Username".to_owned(),
+                    "admin".to_owned(),
+                ),
+            ]
+            .into_iter(),
+        );
+
+        let users = &layer["identity"]["inmemoryusers"];
+
+        assert!(users.is_array(), "expected an array, got {users}");
+        assert_eq!(users[0]["username"], json!("demo"));
+        assert_eq!(
+            users[0]["permissions"],
+            json!(["music.read", "orders.read"])
+        );
+        assert_eq!(users[1]["username"], json!("admin"));
+    }
+
+    #[test]
+    fn a_map_with_gappy_numeric_keys_stays_a_map() {
+        // Only a dense run from zero is an array; anything else is a map that
+        // happens to use numeric keys.
+        let layer = environment_layer(
+            [
+                ("Thing__0__Name".to_owned(), "first".to_owned()),
+                ("Thing__2__Name".to_owned(), "third".to_owned()),
+            ]
+            .into_iter(),
+        );
+
+        assert!(layer["thing"].is_object(), "got {}", layer["thing"]);
+    }
+
+    #[test]
+    fn a_map_with_ordinary_keys_stays_a_map() {
+        let layer = environment_layer(
+            [("Logging__LogLevel__Default".to_owned(), "Debug".to_owned())].into_iter(),
+        );
+
+        assert_eq!(layer["logging"]["loglevel"]["default"], json!("Debug"));
+    }
+
+    #[test]
+    fn a_deeper_variable_wins_over_a_shallower_one() {
+        let layer = environment_layer(
+            [
+                ("Jwt".to_owned(), "ignored".to_owned()),
+                ("Jwt__Issuer".to_owned(), "https://auth.local".to_owned()),
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(layer["jwt"]["issuer"], json!("https://auth.local"));
     }
 
     #[test]

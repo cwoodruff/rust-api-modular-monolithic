@@ -271,17 +271,10 @@ fn default_type_for(fragment: &str) -> &'static str {
 /// on the value; matching the shape keeps responses recognizable.
 #[must_use]
 pub fn new_trace_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    let trace: u128 = rand::random();
+    let span: u64 = rand::random();
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let seed = sequence
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .rotate_left(31)
-        .wrapping_add(0x1234_5678_9ABC_DEF0);
-
-    format!("00-{sequence:016x}{seed:016x}-{seed:016x}-00")
+    format!("00-{trace:032x}-{span:016x}-00")
 }
 
 #[cfg(test)]
@@ -434,6 +427,35 @@ mod tests {
         assert_eq!(segments[1].len(), 32, "{trace}");
         assert_eq!(segments[2].len(), 16, "{trace}");
         assert_eq!(segments[3], "00");
-        assert_ne!(new_trace_id(), new_trace_id());
+        assert!(
+            segments[1].chars().all(|c| c.is_ascii_hexdigit()),
+            "{trace}"
+        );
+    }
+
+    #[test]
+    fn trace_identifiers_actually_vary_across_their_whole_width() {
+        // An earlier version derived both halves from a counter, which left
+        // the span identical on every response and the trace mostly zeroes.
+        // Length checks alone did not catch it.
+        let samples: Vec<String> = (0..16).map(|_| new_trace_id()).collect();
+
+        let traces: BTreeMap<&str, ()> = samples
+            .iter()
+            .map(|id| (id.split('-').nth(1).unwrap_or_default(), ()))
+            .collect();
+        let spans: BTreeMap<&str, ()> = samples
+            .iter()
+            .map(|id| (id.split('-').nth(2).unwrap_or_default(), ()))
+            .collect();
+
+        assert_eq!(traces.len(), samples.len(), "every trace should differ");
+        assert_eq!(spans.len(), samples.len(), "every span should differ");
+        assert!(
+            !samples
+                .iter()
+                .any(|id| id.contains("-0000000000000000") || id.contains("00000000000000000000")),
+            "a run of zeroes suggests the identifier is not really random: {samples:?}"
+        );
     }
 }

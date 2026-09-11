@@ -89,3 +89,23 @@ pub async fn build_state_for(
 
     build_state(config, content_root).await
 }
+
+/// Builds the Identity module's runtime.
+///
+/// Separate from [`build_state`] because the module owns its own services
+/// rather than putting them in the shared state — nothing outside Identity
+/// needs the token service, and the guards read the principal from the request
+/// instead.
+///
+/// # Errors
+///
+/// Returns an error if the key provider is unusable in this environment.
+pub fn build_identity(
+    config: &AppConfig,
+    content_root: &Path,
+) -> anyhow::Result<std::sync::Arc<module_identity::IdentityRuntime>> {
+    let runtime = module_identity::IdentityRuntime::from_config(config, content_root)
+        .context("failed to build the Identity module")?;
+
+    Ok(std::sync::Arc::new(runtime))
+}

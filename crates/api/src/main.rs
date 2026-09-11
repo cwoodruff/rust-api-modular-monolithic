@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use api::{DEFAULT_HTTP_PORT, build, build_state, load_config};
+use api::{DEFAULT_HTTP_PORT, build, build_identity, build_state, load_config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,8 +24,9 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_HTTP_PORT);
 
+    let identity = build_identity(&config, &content_root)?;
     let state = build_state(config, &content_root).await?;
-    let app = build(state);
+    let app = build(state, identity);
 
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(address)

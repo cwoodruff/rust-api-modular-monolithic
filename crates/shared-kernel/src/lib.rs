@@ -9,6 +9,7 @@
 //! cannot live on a trait object at all. Where the interface carried real
 //! polymorphism, such as [`Module`](module::Module), it stays a trait.
 
+pub mod auth;
 pub mod build_info;
 pub mod caching;
 pub mod config;
@@ -18,6 +19,7 @@ pub mod health;
 pub mod module;
 pub mod traffic_control;
 
+pub use auth::{AuthenticatedUser, AuthorizationFailure, Principal, Requirement};
 pub use config::AppConfig;
 pub use environment::Environment;
 pub use errors::ProblemDetails;
