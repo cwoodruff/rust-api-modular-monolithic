@@ -1732,9 +1732,11 @@ dependencies = [
  "async-trait",
  "chrono",
  "rust_decimal",
+ "serde_json",
  "shared-kernel",
  "shared-persistence",
  "sqlx",
+ "tokio",
  "tracing",
 ]
 
