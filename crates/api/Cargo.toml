@@ -1,0 +1,39 @@
+[package]
+name = "api"
+description = "Port of ModularMonolith.Api: the host that composes every module."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "modular-monolith-api"
+path = "src/main.rs"
+
+[dependencies]
+shared-kernel = { workspace = true }
+shared-persistence = { workspace = true }
+# The host is the only crate allowed to see a concrete database driver.
+shared-data-sqlite = { workspace = true }
+
+module-admin = { workspace = true }
+module-identity = { workspace = true }
+module-music = { workspace = true }
+module-orders = { workspace = true }
+module-reporting = { workspace = true }
+
+anyhow = { workspace = true }
+axum = { workspace = true }
+figment = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,0 +1,21 @@
+[package]
+name = "shared-persistence"
+description = "Port of SharedKernel.Persistence: entities, API models, validators, repository traits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+shared-kernel = { workspace = true }
+
+async-trait = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

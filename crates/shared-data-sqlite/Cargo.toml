@@ -1,0 +1,21 @@
+[package]
+name = "shared-data-sqlite"
+description = "Port of SharedKernel.DataSQLite: sqlx implementations of the repository traits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+shared-kernel = { workspace = true }
+shared-persistence = { workspace = true }
+
+async-trait = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
