@@ -10,19 +10,22 @@ preserve-versus-fix decisions that define what "equivalent" means here, is in
 
 ## Status
 
-**Phase 4 of 9 — the host serves HTTP.** `cargo run -p api` now starts a real
-server on port 5043 with the middleware pipeline in the original's order, the
-root endpoint, and `/health` plus `/data-health` for all five modules.
+**Phase 6 of 9 — Music and Orders are live.** 37 of the 47 routes are
+implemented, and **every one of them has been diffed byte-for-byte against the
+running C# original**: `tools/parity-diff.py` reports 45/45 routes identical,
+ignoring only members that cannot match by construction (timestamps, trace
+identifiers, the build's version string, and each host's own signing key).
 
 Under it: `shared-kernel` carries the cross-cutting machinery (configuration,
 environment gating, RFC 7807 errors, the cache facade, rate-limit partitioning,
-the module contract, health payloads); `shared-persistence` carries the domain
-(entities, API models, validators, repository traits, application state); and
-`shared-data-sqlite` implements all ten repositories in sqlx against the real
-Chinook database.
+authorization guards, the module contract, health payloads);
+`shared-persistence` carries the domain (entities, API models, validators,
+repository traits, application state); `shared-data-sqlite` implements all ten
+repositories in sqlx; and Identity issues RS256 tokens whose claims match the
+original's exactly.
 
-Next: the Identity module in Phase 5, then the business endpoints. See the
-phase table in the plan.
+Next: Administration and its Genre write endpoints in Phase 7. See the phase
+table in the plan.
 
 ```console
 $ curl -s localhost:5043/api/music/data-health

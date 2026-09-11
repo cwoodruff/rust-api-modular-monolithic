@@ -83,19 +83,39 @@ impl Repository<Album> for SqliteAlbumRepository {
 
 #[async_trait]
 impl AlbumRepository for SqliteAlbumRepository {
-    async fn get_by_artist_id(&self, id: i32) -> RepositoryResult<Vec<Album>> {
+    /// Albums by one artist, each carrying the artist's name.
+    ///
+    /// The C# query `Include`s the artist, and the conversion reads its name,
+    /// so `ArtistName` is populated here even though the plain collection
+    /// endpoint leaves it null. The nested `Artist` object stays null and
+    /// `Tracks` stays empty, because the conversion copies neither.
+    async fn get_by_artist_id(&self, id: i32) -> RepositoryResult<Vec<AlbumApiModel>> {
         let rows = sqlx::query(
-            r#"SELECT "Id", "Title", "ArtistId" FROM "Album" WHERE "ArtistId" = ? ORDER BY "Id""#,
+            r#"SELECT a."Id", a."Title", a."ArtistId", ar."Name" AS "ArtistName"
+               FROM "Album" a
+               LEFT JOIN "Artist" ar ON ar."Id" = a."ArtistId"
+               WHERE a."ArtistId" = ?
+               ORDER BY a."Id""#,
         )
         .bind(id)
         .fetch_all(&self.pool)
         .await
         .map_err(common::database)?;
 
-        rows.iter()
-            .map(rows::album)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(common::database)
+        let mut albums = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let album = rows::album(row).map_err(common::database)?;
+            albums.push(AlbumApiModel {
+                id: album.id,
+                title: album.title,
+                artist_name: rows::text(row, "ArtistName").map_err(common::database)?,
+                artist_id: album.artist_id,
+                artist: None,
+                tracks: Vec::new(),
+            });
+        }
+
+        Ok(albums)
     }
 
     /// The album with its artist and tracks.

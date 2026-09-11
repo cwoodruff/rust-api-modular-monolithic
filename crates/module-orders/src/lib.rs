@@ -1,12 +1,16 @@
 //! Port of the C# `Orders.Module` project.
 //!
-//! Health endpoints are live. The 7 read endpoints — invoices and invoice
-//! lines — land in Phase 6, stacking the `orders.read` and `tenant.scoped`
+//! Seven read endpoints — invoices and invoice lines — plus health and
+//! data-health. Data endpoints stack the `orders.read` and `tenant.scoped`
 //! policies.
 //!
-//! One asymmetry to carry over deliberately when they do:
-//! `GET /invoice-lines/{id}` returns the *entity* shape rather than an API
-//! model, because the C# repository's `GetById` does.
+//! One asymmetry carried over deliberately: `GET /invoice-lines/{id}` returns
+//! the *entity* shape rather than an API model, because the C# repository's
+//! `GetById` does and the service passes it straight through. It is the only
+//! endpoint in the application that does this.
+
+mod endpoints;
+mod services;
 
 use axum::Router;
 use shared_kernel::{Module, health};
@@ -32,6 +36,6 @@ impl Module<AppState> for OrdersModule {
     }
 
     fn router(&self) -> Router<AppState> {
-        health::routes(NAME)
+        health::routes(NAME).merge(endpoints::routes())
     }
 }

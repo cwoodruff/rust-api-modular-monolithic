@@ -46,33 +46,10 @@ use crate::entities::{
     Album, Artist, Customer, Employee, Genre, Invoice, InvoiceLine, MediaType, Playlist, Track,
 };
 
-/// Something went wrong talking to the database.
-///
-/// The driver's own error type is boxed because this crate must not depend on
-/// a driver. The C# equivalent is an unhandled exception, which the host turns
-/// into a 500 — [`Self::into_problem`] keeps that mapping explicit.
-#[derive(Debug, thiserror::Error)]
-pub enum RepositoryError {
-    /// The underlying database reported a failure.
-    #[error("database operation failed")]
-    Database(#[source] Box<dyn std::error::Error + Send + Sync>),
-}
-
-impl RepositoryError {
-    /// Wraps a driver error.
-    pub fn database(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
-        Self::Database(source.into())
-    }
-
-    /// The 500 the host returns for a repository failure, leaking no detail.
-    #[must_use]
-    pub fn into_problem(self, trace_id: impl Into<String>) -> shared_kernel::ProblemDetails {
-        shared_kernel::ProblemDetails::internal_server_error(trace_id)
-    }
-}
-
-/// Result of a repository call.
-pub type RepositoryResult<T> = Result<T, RepositoryError>;
+// The error type lives in `shared-kernel` so that crate can render it as a
+// response without depending on this one. Re-exported here because this is
+// where callers expect to find it.
+pub use shared_kernel::data::{RepositoryError, RepositoryResult};
 
 /// Port of `IRepository<T>`.
 #[async_trait]
@@ -97,7 +74,15 @@ pub trait Repository<T>: Send + Sync {
 #[async_trait]
 pub trait AlbumRepository: Repository<Album> {
     /// Albums recorded by one artist.
-    async fn get_by_artist_id(&self, id: i32) -> RepositoryResult<Vec<Album>>;
+    ///
+    /// Returns API models rather than entities, which is the one place this
+    /// contract departs from the C# signature. There, `GetByArtistId` returns
+    /// `List<Album>` but `Include`s the artist, and `Album.Convert()` reads
+    /// `Artist?.Name` — so the `ArtistName` member *is* populated on this
+    /// route, while the plain `GetAll` leaves it null. The entities here are
+    /// row shapes with no navigation, so the join has to surface through the
+    /// return type instead. Caught by diffing against the running service.
+    async fn get_by_artist_id(&self, id: i32) -> RepositoryResult<Vec<AlbumApiModel>>;
 
     /// One album with its artist and tracks.
     async fn get_by_id(&self, id: i32) -> RepositoryResult<Option<AlbumApiModel>>;
@@ -222,29 +207,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-
-    #[test]
-    fn a_repository_error_reports_a_500_without_detail() {
-        let error = RepositoryError::database("no such table: Album");
-
-        let problem = error.into_problem("trace-1");
-
-        assert_eq!(problem.status, 500);
-        assert_eq!(
-            problem.detail, None,
-            "the driver's message must not reach the client"
-        );
-    }
-
-    #[test]
-    fn the_driver_error_is_still_available_for_logging() {
-        let error = RepositoryError::database("no such table: Album");
-
-        assert_eq!(
-            std::error::Error::source(&error).map(ToString::to_string),
-            Some("no such table: Album".to_owned())
-        );
-    }
 
     /// Compile-time proof that every contract stays usable as a trait object,
     /// so the host can hold them behind `Arc<dyn …>` the way the DI container

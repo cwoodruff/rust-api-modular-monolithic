@@ -5,7 +5,7 @@
 //! `decimal(10, 2)` but stored as `real`, and timestamps are declared `datetime`
 //! but stored as text carrying a UTC offset.
 
-use chrono::{DateTime, NaiveDateTime};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 use shared_persistence::api_models::TrackApiModel;
@@ -61,9 +61,12 @@ pub(crate) fn money(value: Option<Decimal>) -> Option<f64> {
 }
 
 /// Reads a timestamp column.
-pub(crate) fn timestamp(row: &SqliteRow, column: &str) -> Result<Option<NaiveDateTime>, Error> {
+pub(crate) fn timestamp(row: &SqliteRow, column: &str) -> Result<Option<DateTime<Utc>>, Error> {
     let value: Option<String> = row.try_get(column)?;
-    Ok(value.as_deref().and_then(parse_timestamp))
+    Ok(value
+        .as_deref()
+        .and_then(parse_timestamp)
+        .map(|naive| naive.and_utc()))
 }
 
 /// Parses the timestamp formats this database is written in.
@@ -228,8 +231,7 @@ pub(crate) fn invoice(row: &SqliteRow) -> Result<Invoice, Error> {
     Ok(Invoice {
         id: id(row, "Id")?,
         customer_id: int(row, "CustomerId")?,
-        invoice_date: timestamp(row, "InvoiceDate")?
-            .unwrap_or_else(|| DateTime::UNIX_EPOCH.naive_utc()),
+        invoice_date: timestamp(row, "InvoiceDate")?.unwrap_or(DateTime::UNIX_EPOCH),
         billing_address: text(row, "BillingAddress")?,
         billing_city: text(row, "BillingCity")?,
         billing_state: text(row, "BillingState")?,

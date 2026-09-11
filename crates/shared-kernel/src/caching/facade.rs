@@ -188,6 +188,57 @@ impl CacheFacade {
         entry.and_then(|cached| cached.value.downcast_ref::<T>().cloned())
     }
 
+    /// Reads through the cache with a factory that can fail.
+    ///
+    /// The C# services let a repository exception propagate out of the cache
+    /// and become a 500. [`Self::get_or_add`] cannot express that — its factory
+    /// returns an `Option`, so a failure would be indistinguishable from "not
+    /// found" and a database outage would quietly read as an empty collection.
+    /// This keeps the failure, and still coalesces concurrent callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the factory's error. Nothing is cached when it fails.
+    pub async fn try_get_or_add<T, E, F, Fut>(
+        &self,
+        key: &CacheKey,
+        factory: F,
+        options: Option<CacheEntryOptions>,
+    ) -> Result<Option<T>, E>
+    where
+        T: Clone + Send + Sync + 'static,
+        E: Send + 'static,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<Option<T>, E>> + Send,
+    {
+        // The factory's error cannot travel through the cache's own return
+        // type, so it is set aside and picked up after.
+        let failure: std::sync::Mutex<Option<E>> = std::sync::Mutex::new(None);
+
+        let value = self
+            .get_or_add(
+                key,
+                || async {
+                    match factory().await {
+                        Ok(found) => found,
+                        Err(error) => {
+                            if let Ok(mut slot) = failure.lock() {
+                                *slot = Some(error);
+                            }
+                            None
+                        }
+                    }
+                },
+                options,
+            )
+            .await;
+
+        match failure.into_inner() {
+            Ok(Some(error)) => Err(error),
+            _ => Ok(value),
+        }
+    }
+
     /// Writes a value directly.
     pub async fn set<T>(&self, key: &CacheKey, value: T, options: Option<CacheEntryOptions>)
     where

@@ -17,7 +17,7 @@
 //! Every string column is nullable in the original, including ones the database
 //! declares `NOT NULL`, so they stay `Option<String>` here.
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -160,9 +160,9 @@ pub struct Employee {
     /// The manager this employee reports to.
     pub reports_to: Option<i32>,
     /// Date of birth.
-    pub birth_date: Option<NaiveDateTime>,
+    pub birth_date: Option<DateTime<Utc>>,
     /// Date hired.
-    pub hire_date: Option<NaiveDateTime>,
+    pub hire_date: Option<DateTime<Utc>>,
     /// Street address.
     pub address: Option<String>,
     /// City.
@@ -192,7 +192,7 @@ pub struct Invoice {
     /// The customer billed.
     pub customer_id: Option<i32>,
     /// When the invoice was raised.
-    pub invoice_date: NaiveDateTime,
+    pub invoice_date: DateTime<Utc>,
     /// Billing street address.
     pub billing_address: Option<String>,
     /// Billing city.
@@ -310,19 +310,22 @@ mod tests {
     }
 
     #[test]
-    fn dates_use_the_same_iso_form_as_system_text_json() {
+    fn dates_carry_the_utc_marker_the_original_emits() {
         let employee = Employee {
             id: 1,
             hire_date: Some(
-                NaiveDateTime::parse_from_str("2002-08-14 00:00:00", "%Y-%m-%d %H:%M:%S")
-                    .expect("valid timestamp"),
+                chrono::NaiveDateTime::parse_from_str("2002-08-14 00:00:00", "%Y-%m-%d %H:%M:%S")
+                    .expect("valid timestamp")
+                    .and_utc(),
             ),
             ..Employee::default()
         };
 
         let document = serde_json::to_value(&employee).expect("employee should serialize");
 
-        assert_eq!(document["HireDate"], json!("2002-08-14T00:00:00"));
+        // A trailing Z: EF reads the column as Kind=Utc, and System.Text.Json
+        // writes that with the zone marker. Confirmed against the service.
+        assert_eq!(document["HireDate"], json!("2002-08-14T00:00:00Z"));
     }
 
     #[test]

@@ -530,7 +530,7 @@ async fn an_invoice_by_id_carries_a_shallow_customer_and_its_lines() {
     assert_eq!(invoice.total, "3.96".parse().unwrap());
     assert_eq!(
         invoice.invoice_date.to_string(),
-        "2007-01-02 00:00:00",
+        "2007-01-02 00:00:00 UTC",
         "the stored offset must not shift the date"
     );
 

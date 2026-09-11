@@ -1,13 +1,16 @@
 //! Port of the C# `Music.Module` project.
 //!
-//! Health endpoints are live. The 15 read endpoints — albums, artists,
-//! playlists, tracks and their by-foreign-key lookups — land in Phase 6, where
-//! every data endpoint stacks the `music.read` and `tenant.scoped` policies.
-//! The two health endpoints stay anonymous, as they do in the original.
+//! Fifteen read endpoints — albums, artists, playlists, tracks and their
+//! by-foreign-key lookups — plus health and data-health. Every data endpoint
+//! stacks the `music.read` and `tenant.scoped` policies; the two health
+//! endpoints stay anonymous, as they do in the original.
 //!
 //! Everything except this module's entry point stays `pub(crate)`, which is how
 //! the port reproduces the C# `PublicSurfaceTests` rule that a module assembly
 //! exports only its module type.
+
+mod endpoints;
+mod services;
 
 use axum::Router;
 use shared_kernel::{Module, health};
@@ -33,6 +36,6 @@ impl Module<AppState> for MusicModule {
     }
 
     fn router(&self) -> Router<AppState> {
-        health::routes(NAME)
+        health::routes(NAME).merge(endpoints::routes())
     }
 }

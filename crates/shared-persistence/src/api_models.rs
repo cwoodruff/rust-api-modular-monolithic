@@ -22,13 +22,13 @@
 //! endpoint returns flat models, because the entity-to-model conversion copies
 //! scalars only. See [`crate::convert`].
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 /// Instant used to default a non-nullable timestamp.
-fn epoch() -> NaiveDateTime {
-    chrono::DateTime::UNIX_EPOCH.naive_utc()
+fn epoch() -> DateTime<Utc> {
+    DateTime::UNIX_EPOCH
 }
 
 /// An artist, optionally with their albums.
@@ -195,9 +195,9 @@ pub struct EmployeeApiModel {
     /// The manager's key.
     pub reports_to: Option<i32>,
     /// Date of birth.
-    pub birth_date: Option<NaiveDateTime>,
+    pub birth_date: Option<DateTime<Utc>>,
     /// Date hired.
-    pub hire_date: Option<NaiveDateTime>,
+    pub hire_date: Option<DateTime<Utc>>,
     /// Street address.
     pub address: Option<String>,
     /// City.
@@ -231,7 +231,7 @@ pub struct InvoiceApiModel {
     /// The customer billed.
     pub customer_id: Option<i32>,
     /// When the invoice was raised.
-    pub invoice_date: NaiveDateTime,
+    pub invoice_date: DateTime<Utc>,
     /// Billing street address.
     pub billing_address: Option<String>,
     /// Billing city.
@@ -376,8 +376,12 @@ mod tests {
         let invoice = InvoiceApiModel {
             id: 1,
             customer_id: Some(2),
-            invoice_date: NaiveDateTime::parse_from_str("2021-01-01 00:00:00", "%Y-%m-%d %H:%M:%S")
-                .expect("valid timestamp"),
+            invoice_date: chrono::NaiveDateTime::parse_from_str(
+                "2021-01-01 00:00:00",
+                "%Y-%m-%d %H:%M:%S",
+            )
+            .expect("valid timestamp")
+            .and_utc(),
             total: "13.86".parse().expect("valid decimal"),
             ..InvoiceApiModel::default()
         };
@@ -385,7 +389,7 @@ mod tests {
         let document = serde_json::to_value(&invoice).expect("invoice should serialize");
 
         assert_eq!(document["Total"], json!(13.86));
-        assert_eq!(document["InvoiceDate"], json!("2021-01-01T00:00:00"));
+        assert_eq!(document["InvoiceDate"], json!("2021-01-01T00:00:00Z"));
         assert_eq!(document["Customer"], json!(null));
         assert_eq!(document["InvoiceLines"], json!([]));
     }

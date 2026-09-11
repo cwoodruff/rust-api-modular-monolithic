@@ -13,6 +13,7 @@ pub mod auth;
 pub mod build_info;
 pub mod caching;
 pub mod config;
+pub mod data;
 pub mod environment;
 pub mod errors;
 pub mod health;
@@ -21,6 +22,7 @@ pub mod traffic_control;
 
 pub use auth::{AuthenticatedUser, AuthorizationFailure, Principal, Requirement};
 pub use config::AppConfig;
+pub use data::{RepositoryError, RepositoryResult};
 pub use environment::Environment;
 pub use errors::ProblemDetails;
 pub use health::{DatabaseProbe, HealthContext, HealthResponse};
