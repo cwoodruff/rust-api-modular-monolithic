@@ -10,9 +10,12 @@ preserve-versus-fix decisions that define what "equivalent" means here, is in
 
 ## Status
 
-**Phase 0 of 9 — scaffold.** The workspace, crate boundaries, architecture
-tests, CI, and the bundled database are in place. The HTTP host lands in
-Phase 4; see the phase table in the plan.
+**Phase 1 of 9 — shared kernel.** The workspace, crate boundaries, architecture
+tests, CI, and the bundled database are in place, and `shared-kernel` now
+carries the cross-cutting machinery every later phase builds on: configuration
+layering, environment gating, RFC 7807 errors, the cache facade, rate-limit
+partitioning, and the module contract. Entities and repositories come next in
+Phase 2; the HTTP host in Phase 4. See the phase table in the plan.
 
 ## Layout
 

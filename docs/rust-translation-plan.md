@@ -118,6 +118,8 @@ The source has documented quirks. Recommended stance: **preserve everything wire
 | P12 | No `Retry-After` on 429; `X-XSS-Protection: 0`; exact CSP string | Replicate |
 | P13 | Dev-only in-memory users from config (`Identity:InMemoryUsers`), plaintext compare, disabled outside Dev/Demo; **no seeded users** — supplied via env/secrets | Replicate, including the startup diagnostics log events |
 | P14 | Env gating on the literal `ASPNETCORE_ENVIRONMENT` value with `Demo` as a first-class environment | Replicate via an `Environment` enum read from the same variable |
+| P15 | The host calls `UseStatusCodePages()`, so any 4xx/5xx with an empty body — a bare `Results.NotFound()`, an auth challenge — comes back as `text/plain` reading `Status Code: 404; Not Found` rather than empty | Replicate; `errors::status_code_page_body` produces the exact string (found in Phase 1, not in the original inventory) |
+| P16 | The cache key composer takes its environment segment from the *configuration value* `ASPNETCORE_ENVIRONMENT`, not the host's resolved environment, so an unconfigured host composes keys under `prod` while reporting `Development` everywhere else. Its app-name fallback is `mmapi`, not the `ServiceName` default | Replicate both fallbacks exactly |
 
 ### Fix (internal bugs — not wire-visible, or wire-visible only as *more correct* behavior)
 
@@ -129,6 +131,7 @@ The source has documented quirks. Recommended stance: **preserve everything wire
 | F4 | Dockerfile uses .NET 9 images for net10.0 and can't start in Production (Dev key provider throws) | Ship a working Dockerfile with sane env defaults documented |
 | F5 | `Produces(404)` declared on collection endpoints that always return 200 | Document 404 only on by-id routes in the OpenAPI spec |
 | F6 | Committed dev RSA private key | Generate on first run; keep the file **gitignored**; loader stays format-compatible |
+| F7 | Single-flight is best-effort: `CompositeCacheFacade` removes each per-key semaphore from its dictionary in the same `finally` that releases it, so concurrent callers can wait on different semaphore instances and more than one runs the factory | Coalescing is handled by the cache itself and is strict. Only ever reduces duplicate work (found in Phase 1) |
 
 ### Verify empirically during Phase 8 (don't guess)
 
