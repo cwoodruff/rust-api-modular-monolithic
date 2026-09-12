@@ -75,7 +75,8 @@ docker build -t modular-monolith-api .
 docker run -p 8080:8080 -e ASPNETCORE_ENVIRONMENT=Demo modular-monolith-api
 ```
 
-A 37 MB image running as a non-root user, with a healthcheck.
+Roughly 170 MB as `docker images` reports it — an 8 MB binary on
+`debian:bookworm-slim` — running as a non-root user, with a healthcheck.
 
 The environment is **not** defaulted. Development and Demo unlock Swagger, the
 in-memory login store and the development signing key, and an image that
