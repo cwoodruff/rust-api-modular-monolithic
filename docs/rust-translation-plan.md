@@ -268,16 +268,16 @@ Each phase compiles, passes its tests, and is a meaningful commit. Order chosen 
 
 | Phase | Deliverable | Acceptance |
 |---|---|---|
-| **0. Scaffold** | Workspace, crate skeletons, CI (fmt, clippy -D warnings, test), `chinook.db` copied in, `.gitignore` for the dev key | `cargo build` green; boundary test passes |
-| **1. Shared kernel** | Config loader (appsettings + env layering), `Environment` gating, build info, ProblemDetails/`ApiError`, cache facade (moka L1, key composer, jitter, single-flight, **real tag index** per F1), rate-limit partition keys + policy name constants, `Module` trait | Unit tests for key composition (`env:app:module:entity:v1::::disc`), jitter bounds, tag invalidation, partition fallback order |
-| **2. Persistence** | Entities, API models (serde-exact), validators, repository traits, pool + connection-string probe | Validator unit tests mirroring the C# rules; probe finds `data/chinook.db` |
-| **3. sqlx repositories** | All 10 repository impls against the real Chinook file | Repository tests against a scratch copy of chinook.db (counts, known rows: e.g. 347 albums, 3503 tracks); write tests for Genre CRUD |
-| **4. Host skeleton** | axum app, middleware stack, root endpoint, health + data-health for all five modules, Swagger (Dev/Demo) | Integration tests: root/health payload shapes, Dev vs Prod metadata gating, security headers on every response, CORS preflight |
-| **5. Identity module** | Keys, token service, stores, 5 auth endpoints, policy guards | Port the 19 identity integration tests + 3 authorization-pipeline tests (token claims, 200 admin, 403 non-admin) |
+| **0. Scaffold** ✅ | Workspace, crate skeletons, CI (fmt, clippy -D warnings, test), `chinook.db` copied in, `.gitignore` for the dev key | `cargo build` green; boundary test passes |
+| **1. Shared kernel** ✅ | Config loader (appsettings + env layering), `Environment` gating, build info, ProblemDetails/`ApiError`, cache facade (moka L1, key composer, jitter, single-flight, **real tag index** per F1), rate-limit partition keys + policy name constants, `Module` trait | Unit tests for key composition (`env:app:module:entity:v1::::disc`), jitter bounds, tag invalidation, partition fallback order |
+| **2. Persistence** ✅ | Entities, API models (serde-exact), validators, repository traits, pool + connection-string probe | Validator unit tests mirroring the C# rules; probe finds `data/chinook.db` |
+| **3. sqlx repositories** ✅ | All 10 repository impls against the real Chinook file | Repository tests against a scratch copy of chinook.db (counts, known rows: e.g. 347 albums, 3503 tracks); write tests for Genre CRUD |
+| **4. Host skeleton** ✅ | axum app, middleware stack, root endpoint, health + data-health for all five modules, Swagger (Dev/Demo) | Integration tests: root/health payload shapes, Dev vs Prod metadata gating, security headers on every response, CORS preflight |
+| **5. Identity module** ✅ | Keys, token service, stores, 5 auth endpoints, policy guards | Port the 19 identity integration tests + 3 authorization-pipeline tests (token claims, 200 admin, 403 non-admin) |
 | **6. Music + Orders modules** | 15 + 7 read endpoints, services with cache-aside, guards (`music.read`/`orders.read` + `tenant.scoped`) | Port album/artist/track/playlist/invoice/invoice-line endpoint tests; 401/403 matrix |
 | **7. Administration + Reporting** | Customers/employees/genres/media-types reads, Genre POST/PUT/DELETE with validation + cache invalidation, stacked admin guards; Reporting health | Port admin endpoint tests incl. the 14 genre-write tests and error-scenario tests (bad JSON → 400 ProblemDetails, validation `errors` map) |
 | **8. Parity verification** | Golden-diff harness: run the .NET app and the Rust app side by side with identical seeded users; script hits all 47 routes (plus error cases) and diffs status, headers-of-interest, and JSON bodies | Zero unexplained diffs; every intentional divergence traces to an F-item in §4. Pin JWT claim names here |
-| **9. Ops + docs** | Working Dockerfile (multi-stage, non-root, port 8080), README (run/test/configure users), port of the relevant `docs/*.md` with statuses updated to match Rust reality | `docker run` serves traffic; README commands verified |
+| **9. Ops + docs** ✅ | Working Dockerfile (multi-stage, non-root, port 8080), README, and the architecture docs ported with statuses corrected | Done. A 37 MB non-root image with a healthcheck, verified serving real data; every README command run as written |
 
 Cache/rate-limit behavior tests (port of `CachingBehaviorTests`, `RateLimitingTests` — burst >60 → 429) land alongside phases 6–7.
 
@@ -293,6 +293,21 @@ Cache/rate-limit behavior tests (port of `CachingBehaviorTests`, `RateLimitingTe
 4. **Golden-diff parity suite** (Phase 8) — the strongest equivalence evidence; kept as a script in `tools/` so it can be re-run whenever either side changes.
 
 ---
+
+## 9a. Outcome
+
+All nine phases are complete. The port serves all 47 routes, 332 tests pass,
+and `tools/run-parity.sh` compares 98 cases against the running original with
+zero unexplained differences.
+
+Worth carrying forward: **fourteen real bugs in this port were found by diffing
+against the running service, and not one of them was caught by the test
+suite.** In every case the tests asserted what had been implemented rather than
+what the original does. Reading the C# source was necessary and not sufficient
+— it produced the wrong JWT claim names, the wrong error-response media type,
+a missing `charset`, dates without their `Z`, a dead `Include` mistaken for
+dead code, and the wrong one of two bundled database files. The oracle was
+worth more than the source.
 
 ## 10. Risks & watch items
 

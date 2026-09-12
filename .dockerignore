@@ -1,0 +1,18 @@
+# The original has no .dockerignore, so its build context includes the whole
+# working tree — bin, obj, .git and all.
+
+target/
+.git/
+.github/
+.idea/
+
+# Generated on first run and never belongs in an image.
+data/identity/
+
+docs/
+tools/
+README.md
+LICENSE
+*.md
+
+.DS_Store
