@@ -10,13 +10,20 @@ preserve-versus-fix decisions that define what "equivalent" means here, is in
 
 ## Status
 
-**Phase 7 of 9 — every route is implemented.** All 47, including the Genre
-write surface, and **every one has been diffed byte-for-byte against the
-running C# original**: `tools/parity-diff.py` reports 64/64 routes identical,
-ignoring only members that cannot match by construction (timestamps, trace
-identifiers, the build's version string, and each host's own signing key). The
-writes were diffed separately and match on 9 of 10 cases; the tenth is a
-malformed-JSON `detail` string that names .NET internals.
+**Phase 8 of 9 — parity is verified and automated.** Every route is
+implemented, and the port is checked against the running C# original across
+**98 cases** — every route, the authorization matrix, routing failures, the
+identity flows and the whole write surface — comparing status codes, nine
+headers and parsed bodies. **Zero unexplained differences.** Four cases differ
+on purpose and are reported as known; see the plan for why.
+
+```sh
+tools/run-parity.sh path/to/aspnetcore-min-api-modular-monolithic
+```
+
+That starts both services, gives each its own copy of the database, runs the
+sweep and stops them. Without the original checked out it explains what it
+needs and exits cleanly, so it is safe to run anywhere.
 
 Under it: `shared-kernel` carries the cross-cutting machinery (configuration,
 environment gating, RFC 7807 errors, the cache facade, rate-limit partitioning,
@@ -26,8 +33,8 @@ repository traits, application state); `shared-data-sqlite` implements all ten
 repositories in sqlx; Identity issues RS256 tokens whose claims match the
 original's exactly; and the five modules carry their endpoints.
 
-Next: the parity harness in CI, a working Dockerfile and the documentation
-pass — Phases 8 and 9. See the phase table in the plan.
+Next: a working Dockerfile and the documentation pass — Phase 9. See the phase
+table in the plan.
 
 ```console
 $ curl -s localhost:5043/api/music/data-health

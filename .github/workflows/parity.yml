@@ -1,0 +1,49 @@
+name: Parity
+
+# Runs the port and the C# original side by side and compares every route.
+#
+# Separate from CI because it needs the original checked out and the .NET SDK
+# installed, and because the rate-limit pauses make it slower than a normal
+# test run. It gates merges to main the same way CI does.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  parity:
+    name: Diff against the original
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out the port
+        uses: actions/checkout@v4
+
+      - name: Check out the original
+        uses: actions/checkout@v4
+        with:
+          repository: cwoodruff/aspnetcore-min-api-modular-monolithic
+          path: .original
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # The host project targets net10.0 even though Directory.Build.props
+          # says net9.0, so the newer SDK is the one that can build it.
+          dotnet-version: "10.0.x"
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run the parity check
+        run: tools/run-parity.sh "$GITHUB_WORKSPACE/.original"

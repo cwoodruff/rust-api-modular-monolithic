@@ -57,9 +57,21 @@ impl From<JsonRejection> for MalformedRequest {
 
 impl MalformedRequest {
     /// The problem document this becomes.
+    ///
+    /// Only a body the parser choked on gets the `Malformed request.` shape.
+    /// Anything else — an unsupported content type, most commonly — never
+    /// reaches the C# exception handler at all: it is a bodiless status that
+    /// the problem-details middleware fills in from its defaults table.
+    /// Verified against the running service, where a request with no
+    /// `Content-Type` answers `Unsupported Media Type` rather than
+    /// `Malformed request.`.
     #[must_use]
     pub fn into_problem(self) -> ProblemDetails {
-        ProblemDetails::malformed_request(self.status, self.detail, new_trace_id())
+        if self.status == StatusCode::BAD_REQUEST {
+            ProblemDetails::malformed_request(self.status, self.detail, new_trace_id())
+        } else {
+            crate::errors::status_code_page(self.status, new_trace_id())
+        }
     }
 }
 
@@ -141,25 +153,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_body_missing_a_required_member_is_also_malformed() {
-        let (status, body) = post_body(Some("application/json"), r#"{"other":1}"#).await;
-
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-
-        let document: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(document["title"], "Malformed request.");
-    }
-
-    #[tokio::test]
-    async fn a_missing_content_type_carries_its_own_status() {
-        // The original's BadHttpRequestException keeps whatever status it was
-        // raised with rather than flattening everything to 400.
+    async fn a_missing_content_type_answers_the_defaults_table_document() {
+        // This never reaches the C# exception handler: it is a bodiless status
+        // the problem-details middleware fills in, so it reads `Unsupported
+        // Media Type` rather than `Malformed request.`.
         let (status, body) = post_body(None, r#"{"name":"Rock"}"#).await;
 
         assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 
         let document: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(document["title"], "Malformed request.");
+        assert_eq!(document["title"], "Unsupported Media Type");
         assert_eq!(document["status"], 415);
+        assert_eq!(
+            document["type"],
+            "https://tools.ietf.org/html/rfc9110#section-15.5.16"
+        );
+        assert!(document.get("detail").is_none());
     }
 }

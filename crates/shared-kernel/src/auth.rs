@@ -124,9 +124,24 @@ pub enum Requirement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorizationFailure {
     /// No usable token: answers 401 with a `WWW-Authenticate` challenge.
+    ///
+    /// The header comes from the authentication middleware's challenge, so it
+    /// appears only when a *protected endpoint* turns a caller away. A 401 an
+    /// endpoint decides on itself — a rejected login, say — carries no
+    /// challenge, and should use [`unauthorized`] instead.
     Unauthenticated,
     /// Authenticated, but a requirement failed: answers 403.
     Forbidden,
+}
+
+/// A 401 an endpoint produced itself, with no `WWW-Authenticate` challenge.
+///
+/// Port of `Results.Unauthorized()` from a handler. Verified against the
+/// running service: a failed login answers 401 with no challenge header,
+/// while a protected endpoint reached without a token answers 401 with one.
+#[must_use]
+pub fn unauthorized() -> Response {
+    status_code_page(axum::http::StatusCode::UNAUTHORIZED, new_trace_id()).into_response()
 }
 
 impl IntoResponse for AuthorizationFailure {

@@ -215,6 +215,17 @@ pub fn status_code_page(status: StatusCode, trace_id: impl Into<String>) -> Prob
     }
 }
 
+/// The `type` ASP.NET Core's defaults table assigns to a status, if any.
+///
+/// `Results.Problem(...)` called without an explicit `type` fills this in, so
+/// a hand-titled problem still carries the framework's URI — which is the
+/// `tools.ietf.org` vocabulary, not the `www.rfc-editor.org` one the custom
+/// exception handler passes explicitly.
+#[must_use]
+pub fn default_problem_type(status: StatusCode) -> Option<&'static str> {
+    problem_defaults(status).0
+}
+
 /// ASP.NET Core's `ProblemDetailsDefaults` table.
 ///
 /// A status in the table gets its `type` and a fixed `title`. Anything else —

@@ -72,6 +72,9 @@ pub fn build(state: AppState, identity: Arc<IdentityRuntime>) -> Router {
         .layer(cors())
         // The OWASP A05 security headers
         .layer(middleware::from_fn(own::security_headers))
+        // ASP.NET Core writes `application/json; charset=utf-8`; axum writes a
+        // bare `application/json`. Problem documents are left alone.
+        .layer(middleware::from_fn(own::json_charset))
         // UseStatusCodePages()
         .layer(middleware::from_fn(own::status_code_pages))
         // UseExceptionHandler(...) — a panic is the closest thing Rust has to

@@ -178,7 +178,27 @@ The tenth is the `detail` of a malformed-JSON problem, and it is an accepted div
 
 **F1 was also confirmed end to end.** With both services warmed and then given the same create, the original's collection endpoint still answered 28 genres while this port answered 29 — the stale read its no-op tag invalidation leaves behind, and the reason the fix exists.
 
-Still open for Phase 8: the remaining volatile-field policy is settled and the harness is checked in, so what is left is running it in CI rather than by hand.
+**V16 — the harness was completed and run clean (Phase 8).** It now covers **98 cases**: every route, the authorization matrix, routing failures, the identity flows, and the whole write surface. Status codes, nine headers, and parsed bodies are all compared. **Zero unexplained differences.** `tools/run-parity.sh` starts both services, gives each its own database copy, runs the sweep and stops them; `.github/workflows/parity.yml` runs it on every push.
+
+Comparing headers and error paths for the first time found four more real differences, every one of them in a place the test suite had no opinion about:
+
+1. **`Content-Type` was missing its charset.** ASP.NET writes `application/json; charset=utf-8`; axum writes a bare `application/json`. Problem documents correctly carry no charset on either side. A middleware now adds it to plain JSON only.
+2. **A rejected login carried a `WWW-Authenticate` challenge.** The header comes from the authentication middleware, so it belongs on a 401 from a *protected endpoint* — not on one an endpoint decided itself, like a bad password. `auth::unauthorized()` is the version without it.
+3. **The `Invalid request` problem used the wrong `type` vocabulary.** `Results.Problem(...)` called without a `type` takes the framework's default (`tools.ietf.org`), not the `www.rfc-editor.org` one the custom exception handler passes explicitly. Both vocabularies really are in use, and which one you get depends on how the problem was raised.
+4. **A missing `Content-Type` answered the wrong document.** It never reaches the C# exception handler at all — it is a bodiless 415 the problem-details middleware fills in — so it reads `Unsupported Media Type`, not `Malformed request.`
+
+### Accepted divergences
+
+Four cases differ on purpose, and the harness reports them as `known` rather than as failures:
+
+| Case | Why |
+|---|---|
+| Three validation failures | **The original loses its security headers on exception-handled responses.** Its security-headers middleware sets them *before* calling the rest of the pipeline, and `UseExceptionHandler` clears the response before writing the problem document, wiping them. This port sets them on the way out, so an error response keeps them. Not reproduced: losing `nosniff` and the CSP on an error response is a real weakness, and no client depends on a header being *absent*. **Worth reporting upstream.** |
+| Malformed JSON | The `detail` is the parser's own diagnostic, and .NET's names its internals — `Failed to read parameter "CreateGenreRequest request" from the request body as JSON.` Matching it would mean hardcoding a C# type and parameter name into a Rust handler. The `type`, `title` and `status` do match. |
+
+### A note on the sweep itself
+
+Every endpoint shares one rate-limit budget of 60 requests per 60 seconds, so a 98-case sweep trips it — the harness paces itself around the window rather than letting a 429 masquerade as a difference. That is worth knowing independently of the port: any client doing a broad sweep of this API, including a test suite or a crawler, gets throttled.
 
 ---
 

@@ -7,7 +7,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use shared_kernel::errors::{CLIENT_ERROR_TYPE, new_trace_id};
+use shared_kernel::auth::unauthorized;
+use shared_kernel::errors::{default_problem_type, new_trace_id};
 use shared_kernel::{AuthorizationFailure, Principal, ProblemDetails, Requirement};
 
 use crate::runtime::IdentityRuntime;
@@ -98,9 +99,14 @@ fn format_offset(instant: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 /// The `Invalid request` problem both blank-field checks return.
+///
+/// `Results.Problem(...)` is called without a `type`, so the framework fills
+/// in the one from its defaults table — the `tools.ietf.org` vocabulary, not
+/// the `www.rfc-editor.org` one the custom exception handler passes. Verified
+/// against the running service.
 fn invalid_request(detail: &str) -> ProblemDetails {
     ProblemDetails {
-        type_uri: Some(CLIENT_ERROR_TYPE.to_owned()),
+        type_uri: default_problem_type(StatusCode::BAD_REQUEST).map(ToOwned::to_owned),
         title: "Invalid request".to_owned(),
         status: StatusCode::BAD_REQUEST.as_u16(),
         detail: Some(detail.to_owned()),
@@ -169,7 +175,9 @@ fn handle_login(runtime: &IdentityRuntime, request: LoginRequest) -> Response {
         .validate_credentials(&request.username, &request.password)
     else {
         tracing::warn!(username = %request.username, "failed login attempt");
-        return AuthorizationFailure::Unauthenticated.into_response();
+        // `Results.Unauthorized()` from the handler, so no challenge header —
+        // that comes only from the authentication middleware.
+        return unauthorized();
     };
 
     tracing::info!(user_id = %user.user_id, "successful login");
@@ -195,7 +203,7 @@ fn handle_refresh(runtime: &IdentityRuntime, request: RefreshRequest) -> Respons
         Some(pair) => Json(TokenResponse::from_pair(pair)).into_response(),
         None => {
             tracing::warn!(user_id = %request.user_id, "failed refresh attempt");
-            AuthorizationFailure::Unauthenticated.into_response()
+            unauthorized()
         }
     }
 }
@@ -317,8 +325,8 @@ mod tests {
         assert_eq!(document["title"], "Invalid request");
         assert_eq!(document["detail"], "Username and password are required.");
         assert_eq!(
-            document["type"],
-            "https://www.rfc-editor.org/rfc/rfc9110#section-15.5.1"
+            document["type"], "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+            "Results.Problem without a type takes the framework's default"
         );
     }
 }

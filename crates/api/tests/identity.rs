@@ -269,10 +269,33 @@ async fn blank_credentials_are_a_bad_request_not_an_unauthorized() {
         assert_eq!(document["title"], "Invalid request");
         assert_eq!(document["detail"], "Username and password are required.");
         assert_eq!(
-            document["type"],
-            "https://www.rfc-editor.org/rfc/rfc9110#section-15.5.1"
+            document["type"], "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+            "Results.Problem without an explicit type takes the framework's \
+             default, which is the tools.ietf.org vocabulary rather than the \
+             www.rfc-editor.org one the custom exception handler passes"
         );
     }
+}
+
+#[tokio::test]
+async fn a_rejected_login_carries_no_challenge_header() {
+    // The challenge comes from the authentication middleware, so a 401 the
+    // endpoint decided on itself does not carry one. Verified against the
+    // running service.
+    let app = app().await;
+
+    let response = post(
+        &app,
+        "/api/identity/login",
+        json!({ "username": "admin", "password": "wrong" }),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    assert!(
+        response.header("www-authenticate").is_none(),
+        "only a protected endpoint's challenge sends this"
+    );
 }
 
 // ---------------------------------------------------------------------------

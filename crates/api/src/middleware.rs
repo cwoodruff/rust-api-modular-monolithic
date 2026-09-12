@@ -117,6 +117,38 @@ pub async fn status_code_pages(request: Request, next: Next) -> Response {
     (merged, problem_body).into_response()
 }
 
+/// The content type ASP.NET Core writes for a JSON body.
+pub const JSON_WITH_CHARSET: &str = "application/json; charset=utf-8";
+
+/// Appends `charset=utf-8` to JSON responses.
+///
+/// ASP.NET Core always writes `application/json; charset=utf-8`, while axum
+/// writes a bare `application/json`. The difference is wire-visible, and a
+/// client that compares the header exactly would see it.
+///
+/// Only plain JSON is rewritten. Problem documents keep their bare
+/// `application/problem+json`, which is what the original sends for those —
+/// verified against the running service, where a 404 and a validation failure
+/// both carry no charset.
+pub async fn json_charset(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+
+    let is_plain_json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == "application/json");
+
+    if is_plain_json {
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(JSON_WITH_CHARSET),
+        );
+    }
+
+    response
+}
+
 /// Adds `Strict-Transport-Security`, as `UseHsts()` does outside Development.
 ///
 /// The original pairs this with `UseHttpsRedirection()`, which 307s plain HTTP
@@ -316,6 +348,11 @@ mod tests {
 
         assert_eq!(limiter.permit_limit, 60);
         assert_eq!(limiter.window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn the_json_content_type_matches_what_asp_net_writes() {
+        assert_eq!(JSON_WITH_CHARSET, "application/json; charset=utf-8");
     }
 
     #[test]
