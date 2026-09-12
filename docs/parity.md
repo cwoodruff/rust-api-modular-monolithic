@@ -135,12 +135,16 @@ wire-visible, and are all reproduced:
 ## Data
 
 Both services must read the same data, and the C# repository ships **two**
-copies of `data/chinook.db`. The host reads the one under its content root
-(`src/ModularMonolith.Api/data/chinook.db`), where Genre 1 is `Rock` and the
-table holds 26 rows. The repository-root copy carries leftovers from a previous
-test run — Genre 1 renamed to `Updated_<guid>`, 34 rows — and the application
-never opens it. Every other table is identical between them.
+copies of `data/chinook.db`:
 
-This repository bundles the copy the host actually reads. Bundling the other
-one was a real bug here, and finding it took the parity diff from 22/26 to
-45/45.
+| Copy | Genres | Genre 1 | State |
+|---|---|---|---|
+| `src/ModularMonolith.Api/data/chinook.db` | 25 | `Rock` | stock Chinook, clean |
+| `data/chinook.db` (repository root) | 34 | `Updated_<guid>` | carries eight rows left by a previous test run |
+
+The host reads the first — `TryFindDb(builder.Environment.ContentRootPath)` —
+and never opens the second. Every table but `Genre` is identical between them.
+
+This repository bundles the copy the host actually reads, byte for byte.
+Bundling the other one was a real bug here, and finding it took the parity diff
+from 22/26 to 45/45.

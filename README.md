@@ -128,9 +128,9 @@ concrete database driver.
 seeding step. The host resolves it from `ConnectionStrings:AppDatabase` (or
 `CONNECTIONSTRINGS__APPDATABASE`), falling back to a walk up the directory tree.
 
-Note the original ships *two* copies of this file and its host reads the one
-under its content root; this repository bundles that copy. See
-[docs/parity.md](docs/parity.md).
+Note the original ships *two* copies of this file — its host reads the clean
+one under its content root, and this repository bundles that copy byte for
+byte. See [docs/parity.md](docs/parity.md).
 
 ## Configuration
 
