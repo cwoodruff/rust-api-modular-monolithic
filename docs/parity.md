@@ -134,16 +134,22 @@ wire-visible, and are all reproduced:
 
 ## Data
 
-Both services must read the same data, and the C# repository ships **two**
-copies of `data/chinook.db`:
+Both services must read the same data, and at the time of the port the C#
+repository shipped **two** copies of `data/chinook.db`:
 
 | Copy | Genres | Genre 1 | State |
 |---|---|---|---|
 | `src/ModularMonolith.Api/data/chinook.db` | 25 | `Rock` | stock Chinook, clean |
-| `data/chinook.db` (repository root) | 34 | `Updated_<guid>` | carries eight rows left by a previous test run |
+| `data/chinook.db` (repository root) | 34 | `Updated_<guid>` | carries eight rows left by test runs |
 
 The host reads the first — `TryFindDb(builder.Environment.ContentRootPath)` —
 and never opens the second. Every table but `Genre` is identical between them.
+
+The second copy was not merely stale: the original's suite was writing to it on
+every run, because its persistence registration read the connection string
+before the test host had supplied one, so the per-test copies it made were never
+opened. Reported as upstream issue #2 and fixed in upstream PR #3, which also
+removes that copy.
 
 This repository bundles the copy the host actually reads, byte for byte.
 Bundling the other one was a real bug here, and finding it took the parity diff

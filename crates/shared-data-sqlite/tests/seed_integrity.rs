@@ -4,9 +4,13 @@
 //! Genre endpoints are a live write surface. That combination has already gone
 //! wrong twice:
 //!
-//! - The original ships a second copy at its repository root carrying eight
+//! - The original shipped a second copy at its repository root carrying eight
 //!   rows a test run left behind, including `Genre` 1 renamed from `Rock` to
-//!   `Updated_<guid>`. It is committed in that state.
+//!   `Updated_<guid>`, committed in that state. Its suite was still writing
+//!   there on every run: the persistence registration read the connection
+//!   string before the test host had supplied one, so the per-test copies were
+//!   created and never opened. Reported as cwoodruff/aspnetcore-min-api-modular-monolithic#2
+//!   and fixed in its PR #3.
 //! - This repository shipped a genre called `PhaseFiveProbe` for two commits,
 //!   from a row created while probing the original and then copied in
 //!   wholesale.
