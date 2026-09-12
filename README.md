@@ -28,7 +28,8 @@ curl -s localhost:5043/api/music/data-health
 
 The data routes need a token, and there are no seeded users — the original
 ships an empty list and expects secrets to fill it, and so does this. To get
-in, supply a login:
+in, supply a login. Logins are read **at startup**, so stop the server you just
+started and hand the variables to the new process:
 
 ```sh
 export ASPNETCORE_ENVIRONMENT=Development
@@ -38,7 +39,23 @@ export Identity__InMemoryUsers__0__UserId=user-1
 export Identity__InMemoryUsers__0__Tenant=tenant-1
 export Identity__InMemoryUsers__0__Permissions__0=music.read
 cargo run -p api
+```
 
+It logs what it loaded, which is worth a look before reaching for curl:
+
+```
+INFO module_identity::stores: effective in-memory login username=demo user_id=user-1 …
+INFO module_identity::stores: loaded in-memory logins count=1
+```
+
+If instead it says `WARN no usable in-memory logins are configured`, the
+variables did not reach the process — a different terminal, an IDE run
+configuration that does not inherit your shell, or an entry missing
+`Username`, `Password` or `UserId`, any one of which drops that login rather
+than failing startup. Every login attempt then answers 401, the same 401 a
+wrong password gets. `Roles`, `DisplayName` and `Email` are optional.
+
+```sh
 TOKEN=$(curl -s -X POST localhost:5043/api/identity/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"demo","password":"secret123"}' | jq -r .access_token)
