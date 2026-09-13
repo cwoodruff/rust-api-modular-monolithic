@@ -236,11 +236,23 @@ struct Window {
 /// 60 requests per 60 seconds per partition, queue depth zero so rejection is
 /// immediate, answering 429. The original writes no `Retry-After`, and neither
 /// does this.
+///
+/// # Why partitions expire
+///
+/// Every distinct partition key gets a map entry, and the key is the caller's
+/// address. Nothing removed them, so a public host accumulated one entry per
+/// address it had ever seen and the map grew for the life of the process —
+/// bounded only by how much of the internet had found it. An entry whose window
+/// closed carries no information: the next request from that address resets it
+/// anyway. They are swept, at most once per window and only while a request is
+/// already being counted.
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
     windows: Arc<DashMap<String, Window>>,
     permit_limit: u32,
     window: Duration,
+    /// When the last sweep ran. `None` until the first request.
+    last_sweep: Arc<std::sync::Mutex<Option<Instant>>>,
 }
 
 impl Default for RateLimiter {
@@ -257,12 +269,15 @@ impl RateLimiter {
             windows: Arc::new(DashMap::new()),
             permit_limit,
             window,
+            last_sweep: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     /// Records a request against `partition`, reporting whether it is allowed.
     fn try_acquire(&self, partition: &str) -> bool {
         let now = Instant::now();
+
+        self.sweep_if_due(now);
 
         let mut entry = self.windows.entry(partition.to_owned()).or_insert(Window {
             started: now,
@@ -280,6 +295,52 @@ impl RateLimiter {
 
         entry.used += 1;
         true
+    }
+
+    /// Drops every partition whose window has already closed.
+    ///
+    /// Returns how many were removed.
+    pub fn sweep_closed_windows(&self) -> usize {
+        self.sweep_closed_windows_as_of(Instant::now())
+    }
+
+    fn sweep_closed_windows_as_of(&self, now: Instant) -> usize {
+        let before = self.windows.len();
+        self.windows
+            .retain(|_, window| now.duration_since(window.started) < self.window);
+
+        let removed = before.saturating_sub(self.windows.len());
+        if removed > 0 {
+            tracing::debug!(removed, "swept closed rate-limit windows");
+        }
+
+        removed
+    }
+
+    /// Sweeps, but at most once per window.
+    ///
+    /// A poisoned lock is treated as "not due" rather than propagated: a
+    /// failure to tidy up must not turn into a failed request.
+    fn sweep_if_due(&self, now: Instant) {
+        {
+            let Ok(mut last) = self.last_sweep.lock() else {
+                return;
+            };
+
+            if last.is_some_and(|last| now.duration_since(last) < self.window) {
+                return;
+            }
+
+            *last = Some(now);
+        }
+
+        self.sweep_closed_windows_as_of(now);
+    }
+
+    /// How many partitions are being tracked, for tests.
+    #[must_use]
+    pub fn tracked_partitions(&self) -> usize {
+        self.windows.len()
     }
 }
 
@@ -400,6 +461,60 @@ mod tests {
         assert!(
             limiter.try_acquire("ip:198.51.100.1"),
             "a fixed window starts over rather than sliding"
+        );
+    }
+
+    #[test]
+    fn partitions_whose_window_has_closed_are_forgotten() {
+        // The map is keyed by the caller's address and nothing removed entries,
+        // so a public host grew one per address it had ever seen. A closed
+        // window carries no information: the next request resets it anyway.
+        let limiter = RateLimiter::new(1, Duration::from_millis(5));
+
+        for octet in 1..=20 {
+            assert!(limiter.try_acquire(&format!("ip:198.51.100.{octet}")));
+        }
+        assert_eq!(limiter.tracked_partitions(), 20);
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert_eq!(limiter.sweep_closed_windows(), 20);
+        assert_eq!(limiter.tracked_partitions(), 0);
+    }
+
+    #[test]
+    fn a_sweep_leaves_an_open_window_alone() {
+        // Forgetting a partition mid-window would hand its caller a fresh
+        // allowance, which is the one thing a limiter must not do.
+        let limiter = RateLimiter::new(1, Duration::from_secs(60));
+
+        assert!(limiter.try_acquire("ip:198.51.100.1"));
+        assert_eq!(limiter.sweep_closed_windows(), 0);
+        assert_eq!(limiter.tracked_partitions(), 1);
+        assert!(
+            !limiter.try_acquire("ip:198.51.100.1"),
+            "the allowance must have survived the sweep"
+        );
+    }
+
+    #[test]
+    fn traffic_alone_is_enough_to_keep_the_map_from_growing() {
+        // The sweep runs off the request path, at most once per window, so
+        // nothing has to be scheduled for the map to stay bounded.
+        let limiter = RateLimiter::new(100, Duration::from_millis(5));
+
+        for octet in 1..=20 {
+            assert!(limiter.try_acquire(&format!("ip:198.51.100.{octet}")));
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(limiter.try_acquire("ip:203.0.113.1"));
+
+        assert_eq!(
+            limiter.tracked_partitions(),
+            1,
+            "the twenty closed windows went with the next request"
         );
     }
 

@@ -154,23 +154,31 @@ impl TokenService {
     ///
     /// - Permissions and tenant are **re-read from the user store**, so a
     ///   revoked permission cannot ride along into the new token.
-    /// - The old refresh token is revoked, so it is single-use. A user who has
-    ///   since been removed has their token revoked and gets nothing back.
+    /// - The old refresh token is single-use.
+    ///
+    /// # Why the token is spent first
+    ///
+    /// The original validates the token, does its work, and revokes at the end.
+    /// Everything between those two steps is a window in which the same token
+    /// is still valid, so two requests arriving together both pass the check
+    /// and both walk away with a fresh pair — and since each new pair carries
+    /// its own refresh token, a captured one can be replayed for as long as the
+    /// race keeps being won. `take` closes the window by making the check and
+    /// the removal a single operation: the token is spent before anything else
+    /// happens, and exactly one caller is told it was valid.
+    ///
+    /// Spending first means a user removed since the token was issued, or a
+    /// signing failure, costs them the token. That is the right direction to
+    /// fail: the alternative leaves a spendable credential behind.
     #[must_use]
     pub fn refresh(&self, user_id: &str, refresh_token: &str) -> Option<TokenPair> {
-        if !self.refresh_tokens.validate(user_id, refresh_token) {
+        if !self.refresh_tokens.take(user_id, refresh_token) {
             return None;
         }
 
-        let Some(user) = self.users.find_by_id(user_id) else {
-            self.refresh_tokens.revoke(user_id, refresh_token);
-            return None;
-        };
+        let user = self.users.find_by_id(user_id)?;
 
-        let pair = self.issue(&user).ok()?;
-        self.refresh_tokens.revoke(user_id, refresh_token);
-
-        Some(pair)
+        self.issue(&user).ok()
     }
 
     /// Validates a bearer token, yielding the principal it names.
@@ -372,6 +380,108 @@ mod tests {
         for candidate in ["", "not-a-token", "a.b.c", "Bearer x"] {
             assert!(service.validate(candidate).is_none(), "{candidate:?}");
         }
+    }
+
+    /// A service with a real user store, so refreshing can succeed.
+    fn service_with_user() -> TokenService {
+        let keys: Arc<dyn KeyMaterial> =
+            Arc::new(DevKeyMaterial::generate().expect("a key should generate"));
+
+        TokenService::new(
+            JwtAuthOptions::default(),
+            keys,
+            Arc::new(InMemoryRefreshTokenStore::new()),
+            Arc::new(crate::stores::InMemoryUserStore::from_records(&[
+                crate::options::InMemoryUserRecord {
+                    username: "admin".to_owned(),
+                    password: "secret".to_owned(),
+                    user_id: "admin-1".to_owned(),
+                    roles: vec!["Admin".to_owned()],
+                    permissions: vec!["music.read".to_owned()],
+                    tenant: Some("tenant-1".to_owned()),
+                    ..crate::options::InMemoryUserRecord::default()
+                },
+            ])),
+        )
+    }
+
+    #[test]
+    fn a_refresh_token_can_be_exchanged_exactly_once() {
+        let service = service_with_user();
+        let issued = service.issue(&user()).expect("issuing should succeed");
+
+        let refreshed = service
+            .refresh("admin-1", &issued.refresh_token)
+            .expect("the first exchange should succeed");
+
+        assert_ne!(refreshed.refresh_token, issued.refresh_token);
+        assert!(
+            service.refresh("admin-1", &issued.refresh_token).is_none(),
+            "the spent token must not work a second time"
+        );
+        assert!(
+            service
+                .refresh("admin-1", &refreshed.refresh_token)
+                .is_some(),
+            "the replacement is what works now"
+        );
+    }
+
+    #[test]
+    fn racing_refreshes_of_one_token_produce_exactly_one_new_pair() {
+        // The original validates, works, and revokes at the end, so every
+        // caller arriving in that window passes — and each walks away with a
+        // fresh pair carrying its own refresh token. A captured token could be
+        // replayed for as long as the race kept being won.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let service = Arc::new(service_with_user());
+        let issued = service.issue(&user()).expect("issuing should succeed");
+
+        let granted = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let service = Arc::clone(&service);
+                let token = issued.refresh_token.clone();
+                let granted = Arc::clone(&granted);
+                let barrier = Arc::clone(&barrier);
+
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if service.refresh("admin-1", &token).is_some() {
+                        granted.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+
+        for thread in threads {
+            thread.join().expect("the thread should finish");
+        }
+
+        assert_eq!(
+            granted.load(Ordering::SeqCst),
+            1,
+            "one refresh token, one exchange"
+        );
+    }
+
+    #[test]
+    fn a_refresh_for_a_user_who_is_gone_spends_the_token_anyway() {
+        // Failing this way round leaves nothing spendable behind.
+        let service = service();
+        let issued = service.issue(&user()).expect("issuing should succeed");
+
+        assert!(
+            service.refresh("admin-1", &issued.refresh_token).is_none(),
+            "the disabled store knows no users"
+        );
+        assert!(
+            service.refresh("admin-1", &issued.refresh_token).is_none(),
+            "and the token is gone regardless"
+        );
     }
 
     #[test]
