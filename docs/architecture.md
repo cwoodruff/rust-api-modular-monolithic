@@ -77,6 +77,16 @@ That is the move. `ClaimsPrincipal` is a framework type and this is the
 framework crate, so Identity *produces* an `AuthenticatedUser` and every other
 module *consumes* one, with neither depending on the other.
 
+**A guard is an extractor, not a line in the handler.** A handler that wants the
+caller takes an `Authorized<P>`, where `P` names the policy — `MusicRead`,
+`AdministrationWrite`. The extractor runs every requirement before the body
+starts, so the only way into the body is through the check, and an endpoint
+written without the guard has no caller to read. The requirement list lives with
+the policy type rather than at the route, which is as close as this gets to the
+original's `RequireAuthorization("music.read")` chain. The earlier shape opened
+every body with a `refuse(&principal)` call; an endpoint that omitted it
+compiled, routed, and served the data.
+
 **Health endpoints are defined once.** The original carries ten near-identical
 files — a health and a data-health handler per module, differing only in a
 name. One route builder in `shared-kernel` serves all five. The responses are

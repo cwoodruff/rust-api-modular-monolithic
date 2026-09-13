@@ -42,14 +42,30 @@ and the code is what ships.
 
 ## Refresh
 
-Refresh rotates: the old token is revoked on use, so a second attempt with the
+Refresh rotates: the old token is spent on use, so a second attempt with the
 same token answers 401. Permissions and tenant are **re-read from the user
 store** on refresh, so a revoked permission cannot ride along into the new
-token, and a user who has since been removed has their token revoked and gets
-nothing back.
+token, and a user who has since been removed gets nothing back.
 
-The store is process-local and lost on restart, and it never evicts expired
-entries — it only checks expiry on read. Both are true of the original.
+The token is spent **before** anything else happens, which is a divergence from
+the original. There, the token is validated, the work is done, and the
+revocation comes last — so everything in between is a window in which the token
+is still valid, and concurrent requests all pass the check and each walks away
+with its own fresh pair. Since every new pair carries a new refresh token, a
+captured one could be replayed for as long as the race kept being won. Here the
+check and the removal are a single `DashMap::remove`, so exactly one caller is
+told the token was good.
+
+The consequence is that a user removed since the token was issued, or a signing
+failure, costs them the token. That is the right direction to fail: the
+alternative leaves a spendable credential behind.
+
+The store is process-local and lost on restart, as the original's is. Unlike the
+original, which checks expiry on read and never removes anything — so its map
+grows for the life of the process, holding credentials — expired entries are
+swept here, at most once a minute and only while something is being written.
+Expiry is still checked on read, so a token that outlives its deadline between
+sweeps is refused regardless.
 
 ## Logins
 
@@ -76,14 +92,39 @@ rather than failing startup. All four behaviors are the original's.
 
 ## Keys
 
-The development provider generates an RSA-2048 key on first use and persists it
-as `{"Kid": …, "PrivateKeyPkcs8Base64": …}` — the same file the C# provider
-writes, so an existing dev key loads unchanged. It refuses to run outside
-Development and Demo, exactly as the original refuses, with a message naming
-what to configure instead.
+Three providers, selected by `Jwt:KeyProvider`.
 
-**Unlike the original, the key is not committed.** The C# repository has a real
-RSA private key in git; this one is generated on first run and gitignored (F6).
+**`Dev`** generates an RSA-2048 key on first use and persists it as
+`{"Kid": …, "PrivateKeyPkcs8Base64": …}` — the same file the C# provider writes,
+so an existing dev key loads unchanged. It refuses to run outside Development
+and Demo, exactly as the original refuses, with a message naming what to
+configure instead.
+
+**`File`** and **`Environment`** read an RSA private key supplied as a PEM,
+either from a path (`Jwt:PemKeyPath`, relative to the content root) or from a
+variable (`Jwt:PemKeyEnvironmentVariable`, `JWT_SIGNING_KEY_PEM` by default).
+Both PKCS#8 and PKCS#1 are accepted, since `openssl genpkey` and `openssl
+genrsa` write different ones. A key too small for RS256 is refused at startup
+rather than at the first signature.
+
+These two have no counterpart in the original, and they exist because without
+one a Production host could not start at all: `Dev` is refused there, and
+`KeyVault` — the original's only other option — is not implemented in this port.
+`Jwt:KeyProvider=KeyVault` is still recognized and refused, with a message
+naming the two that work.
+
+The `kid` a PEM provider publishes is the key's RFC 7638 thumbprint, so it is
+the same across restarts and across replicas sharing a key; a random one would
+change on every boot and a client holding a cached JWKS document would reject
+good tokens until it refetched. `Jwt:KeyId` overrides it.
+
+**Unlike the original, the dev key is not committed.** The C# repository has a
+real RSA private key in git; this one is generated on first run and gitignored
+(F6).
+
+`Jwt:KeyVaultVaultUri` is spelled `KeyVaultVautUri` in the C# record. The
+correct spelling is canonical here, with the original's kept as an alias so a
+deployment already setting the misspelled key keeps binding.
 
 JWKS is served from `/api/identity/.well-known/jwks.json` — inside the module
 group, not at the conventional root path. That is the original's arrangement,
