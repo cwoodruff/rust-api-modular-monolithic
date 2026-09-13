@@ -28,8 +28,11 @@ use axum::http::{HeaderName, HeaderValue, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
-use shared_kernel::errors::{ProblemDetails, new_trace_id, status_code_page};
+use shared_kernel::errors::{
+    ProblemDetails, current_trace_id, is_traceparent, new_trace_id, status_code_page, with_trace_id,
+};
 use shared_kernel::traffic_control::{self, PUBLIC_ANON_PERMIT_LIMIT, PUBLIC_ANON_WINDOW};
+use tracing::Instrument;
 
 /// The six headers the original sets on every response, labelled "OWASP A05".
 ///
@@ -63,6 +66,60 @@ pub const ALLOWED_ORIGINS: [&str; 6] = [
     "https://localhost:4200",
     "https://localhost:5173",
 ];
+
+/// The header the request's trace identifier is echoed on.
+///
+/// The original sets no such header: its `traceId` appears only in the body of
+/// a problem document, so a 200 carries no identifier at all and a client
+/// reporting a slow or wrong response has nothing to quote. This adds one
+/// without changing any body.
+pub const TRACE_ID_HEADER: HeaderName = HeaderName::from_static("x-trace-id");
+
+/// The inbound header a caller can use to continue an existing trace.
+pub const TRACEPARENT_HEADER: HeaderName = HeaderName::from_static("traceparent");
+
+/// Establishes the request's trace identifier.
+///
+/// This is what makes the `traceId` in a problem document worth anything.
+/// Before it, every response-building path minted its own identifier: the body
+/// of a 500 named one trace, the log record written while handling it named
+/// none, and nothing tied the two together — so the one field whose entire
+/// purpose is correlation correlated with nothing.
+///
+/// One identifier is now established per request and used three ways: it is
+/// the ambient value [`current_trace_id`] returns, so every problem document
+/// raised anywhere inside reports it; it is a field on the `tracing` span that
+/// wraps the request, so every log record emitted while handling it carries it;
+/// and it goes out on [`TRACE_ID_HEADER`], so a caller can quote it.
+///
+/// A caller's own `traceparent` is honored when it really is one, so a trace
+/// that started upstream continues rather than restarting here.
+pub async fn request_id(request: Request, next: Next) -> Response {
+    let inbound = request
+        .headers()
+        .get(&TRACEPARENT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| is_traceparent(value))
+        .map(ToOwned::to_owned);
+
+    let trace_id = inbound.unwrap_or_else(new_trace_id);
+
+    let span = tracing::info_span!(
+        "request",
+        trace_id = %trace_id,
+        method = %request.method(),
+        path = %request.uri().path(),
+    );
+
+    let mut response = with_trace_id(trace_id.clone(), next.run(request).instrument(span)).await;
+
+    if let Ok(value) = HeaderValue::from_str(&trace_id) {
+        response.headers_mut().insert(TRACE_ID_HEADER, value);
+    }
+
+    response
+}
 
 /// Sets the security headers on every response.
 pub async fn security_headers(request: Request, next: Next) -> Response {
@@ -179,11 +236,23 @@ struct Window {
 /// 60 requests per 60 seconds per partition, queue depth zero so rejection is
 /// immediate, answering 429. The original writes no `Retry-After`, and neither
 /// does this.
+///
+/// # Why partitions expire
+///
+/// Every distinct partition key gets a map entry, and the key is the caller's
+/// address. Nothing removed them, so a public host accumulated one entry per
+/// address it had ever seen and the map grew for the life of the process —
+/// bounded only by how much of the internet had found it. An entry whose window
+/// closed carries no information: the next request from that address resets it
+/// anyway. They are swept, at most once per window and only while a request is
+/// already being counted.
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
     windows: Arc<DashMap<String, Window>>,
     permit_limit: u32,
     window: Duration,
+    /// When the last sweep ran. `None` until the first request.
+    last_sweep: Arc<std::sync::Mutex<Option<Instant>>>,
 }
 
 impl Default for RateLimiter {
@@ -200,12 +269,15 @@ impl RateLimiter {
             windows: Arc::new(DashMap::new()),
             permit_limit,
             window,
+            last_sweep: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     /// Records a request against `partition`, reporting whether it is allowed.
     fn try_acquire(&self, partition: &str) -> bool {
         let now = Instant::now();
+
+        self.sweep_if_due(now);
 
         let mut entry = self.windows.entry(partition.to_owned()).or_insert(Window {
             started: now,
@@ -223,6 +295,52 @@ impl RateLimiter {
 
         entry.used += 1;
         true
+    }
+
+    /// Drops every partition whose window has already closed.
+    ///
+    /// Returns how many were removed.
+    pub fn sweep_closed_windows(&self) -> usize {
+        self.sweep_closed_windows_as_of(Instant::now())
+    }
+
+    fn sweep_closed_windows_as_of(&self, now: Instant) -> usize {
+        let before = self.windows.len();
+        self.windows
+            .retain(|_, window| now.duration_since(window.started) < self.window);
+
+        let removed = before.saturating_sub(self.windows.len());
+        if removed > 0 {
+            tracing::debug!(removed, "swept closed rate-limit windows");
+        }
+
+        removed
+    }
+
+    /// Sweeps, but at most once per window.
+    ///
+    /// A poisoned lock is treated as "not due" rather than propagated: a
+    /// failure to tidy up must not turn into a failed request.
+    fn sweep_if_due(&self, now: Instant) {
+        {
+            let Ok(mut last) = self.last_sweep.lock() else {
+                return;
+            };
+
+            if last.is_some_and(|last| now.duration_since(last) < self.window) {
+                return;
+            }
+
+            *last = Some(now);
+        }
+
+        self.sweep_closed_windows_as_of(now);
+    }
+
+    /// How many partitions are being tracked, for tests.
+    #[must_use]
+    pub fn tracked_partitions(&self) -> usize {
+        self.windows.len()
     }
 }
 
@@ -266,14 +384,18 @@ pub fn panic_to_problem(panic: Box<dyn std::any::Any + Send + 'static>) -> Respo
     ProblemDetails::internal_server_error(trace_id()).into_response()
 }
 
-/// A correlation identifier for one response.
+/// The identifier this response should report.
+///
+/// Inside a request this is the one [`request_id`] established, so the document
+/// a layer writes names the same trace the log records do. Outside one — in a
+/// test that calls a layer directly — it falls back to a fresh identifier.
 ///
 /// Verified against the running service: every `traceId` on the wire is a W3C
 /// `traceparent`, because `HttpContext.TraceIdentifier` reports the ambient
 /// activity rather than Kestrel's connection counter.
 #[must_use]
 pub fn trace_id() -> String {
-    new_trace_id()
+    current_trace_id()
 }
 
 /// Whether a request arrived over a secure transport.
@@ -339,6 +461,60 @@ mod tests {
         assert!(
             limiter.try_acquire("ip:198.51.100.1"),
             "a fixed window starts over rather than sliding"
+        );
+    }
+
+    #[test]
+    fn partitions_whose_window_has_closed_are_forgotten() {
+        // The map is keyed by the caller's address and nothing removed entries,
+        // so a public host grew one per address it had ever seen. A closed
+        // window carries no information: the next request resets it anyway.
+        let limiter = RateLimiter::new(1, Duration::from_millis(5));
+
+        for octet in 1..=20 {
+            assert!(limiter.try_acquire(&format!("ip:198.51.100.{octet}")));
+        }
+        assert_eq!(limiter.tracked_partitions(), 20);
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert_eq!(limiter.sweep_closed_windows(), 20);
+        assert_eq!(limiter.tracked_partitions(), 0);
+    }
+
+    #[test]
+    fn a_sweep_leaves_an_open_window_alone() {
+        // Forgetting a partition mid-window would hand its caller a fresh
+        // allowance, which is the one thing a limiter must not do.
+        let limiter = RateLimiter::new(1, Duration::from_secs(60));
+
+        assert!(limiter.try_acquire("ip:198.51.100.1"));
+        assert_eq!(limiter.sweep_closed_windows(), 0);
+        assert_eq!(limiter.tracked_partitions(), 1);
+        assert!(
+            !limiter.try_acquire("ip:198.51.100.1"),
+            "the allowance must have survived the sweep"
+        );
+    }
+
+    #[test]
+    fn traffic_alone_is_enough_to_keep_the_map_from_growing() {
+        // The sweep runs off the request path, at most once per window, so
+        // nothing has to be scheduled for the map to stay bounded.
+        let limiter = RateLimiter::new(100, Duration::from_millis(5));
+
+        for octet in 1..=20 {
+            assert!(limiter.try_acquire(&format!("ip:198.51.100.{octet}")));
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(limiter.try_acquire("ip:203.0.113.1"));
+
+        assert_eq!(
+            limiter.tracked_partitions(),
+            1,
+            "the twenty closed windows went with the next request"
         );
     }
 

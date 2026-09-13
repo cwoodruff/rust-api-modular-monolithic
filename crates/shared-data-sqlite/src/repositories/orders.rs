@@ -60,7 +60,7 @@ impl Repository<Invoice> for SqliteInvoiceRepository {
                RETURNING {INVOICE_COLUMNS}"#
         ))
         .bind(entity.customer_id)
-        .bind(entity.invoice_date)
+        .bind(rows::timestamp_text(Some(entity.invoice_date)))
         .bind(&entity.billing_address)
         .bind(&entity.billing_city)
         .bind(&entity.billing_state)
@@ -75,18 +75,14 @@ impl Repository<Invoice> for SqliteInvoiceRepository {
     }
 
     async fn update(&self, entity: Invoice) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
-
-        sqlx::query(
+        let updated = sqlx::query(
             r#"UPDATE "Invoice" SET "CustomerId" = ?, "InvoiceDate" = ?, "BillingAddress" = ?,
                                     "BillingCity" = ?, "BillingState" = ?, "BillingCountry" = ?,
                                     "BillingPostalCode" = ?, "Total" = ?
                WHERE "Id" = ?"#,
         )
         .bind(entity.customer_id)
-        .bind(entity.invoice_date)
+        .bind(rows::timestamp_text(Some(entity.invoice_date)))
         .bind(&entity.billing_address)
         .bind(&entity.billing_city)
         .bind(&entity.billing_state)
@@ -98,7 +94,7 @@ impl Repository<Invoice> for SqliteInvoiceRepository {
         .await
         .map_err(common::database)?;
 
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {
@@ -294,11 +290,7 @@ impl Repository<InvoiceLine> for SqliteInvoiceLineRepository {
     }
 
     async fn update(&self, entity: InvoiceLine) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
-
-        sqlx::query(
+        let updated = sqlx::query(
             r#"UPDATE "InvoiceLine" SET "InvoiceId" = ?, "TrackId" = ?, "UnitPrice" = ?,
                                         "Quantity" = ?
                WHERE "Id" = ?"#,
@@ -312,7 +304,7 @@ impl Repository<InvoiceLine> for SqliteInvoiceLineRepository {
         .await
         .map_err(common::database)?;
 
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {

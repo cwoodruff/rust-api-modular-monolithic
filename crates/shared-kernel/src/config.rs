@@ -51,10 +51,26 @@ pub enum ConfigError {
 }
 
 /// The resolved configuration, plus the environment the host is running as.
-#[derive(Debug, Clone)]
+///
+/// `Debug` names the environment and nothing else. Every layer this holds is a
+/// place secrets live — `ConnectionStrings:AppDatabase`, the passwords under
+/// `Identity:InMemoryUsers`, whatever the process environment carries — and a
+/// derived `Debug` would print the lot on the first `tracing` call that wrote
+/// `?config`.
+#[derive(Clone)]
 pub struct AppConfig {
     figment: Figment,
     environment: Environment,
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AppConfig")
+            .field("environment", &self.environment)
+            .field("values", &crate::redaction::REDACTED)
+            .finish()
+    }
 }
 
 impl AppConfig {
@@ -521,6 +537,24 @@ mod tests {
         );
 
         assert_eq!(layer["jwt"]["issuer"], json!("https://auth.local"));
+    }
+
+    #[test]
+    fn the_configuration_does_not_print_the_values_it_holds() {
+        // A connection string and a password both live in here.
+        let config = config_from(
+            json!({
+                "ConnectionStrings": { "AppDatabase": "Data Source=/secret/path.db" },
+                "Identity": { "InMemoryUsers": [{ "Username": "demo", "Password": "hunter2" }] }
+            }),
+            Environment::Production,
+        );
+
+        let rendered = format!("{config:?}");
+
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!rendered.contains("/secret/path.db"), "{rendered}");
+        assert!(rendered.contains("Production"), "{rendered}");
     }
 
     #[test]

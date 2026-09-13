@@ -3,6 +3,15 @@
 //! Every data endpoint stacks two policies — `music.read` and `tenant.scoped` —
 //! and both must pass. The health endpoints stay anonymous.
 //!
+//! # How the guard is applied
+//!
+//! Each handler takes an [`Authorized<MusicRead>`]. That argument is the check:
+//! the extractor runs both requirements before the handler body starts, and
+//! there is no way to write a handler here that reads data without one, because
+//! `services::*` needs the state and the route needs the extractor to build the
+//! handler at all. The earlier shape opened every body with a `refuse(...)`
+//! call, where an omission compiled cleanly and served the data.
+//!
 //! # Trailing slashes
 //!
 //! The original registers its collection routes with a trailing slash
@@ -12,26 +21,24 @@
 //! registered under both spellings rather than normalizing the path globally —
 //! a global rewrite would also affect routes the original leaves alone.
 
-use axum::Router;
 use axum::extract::{Path, State};
-use axum::response::Response;
 use axum::routing::get;
-use shared_kernel::Principal;
-use shared_kernel::auth::{policies, read_scoped};
-use shared_kernel::data::{collection_response, item_response};
+use axum::{Json, Router};
+use shared_kernel::data::found;
+use shared_kernel::guards::MusicRead;
+use shared_kernel::{ApiError, Authorized};
 use shared_persistence::AppState;
+use shared_persistence::api_models::{
+    AlbumApiModel, ArtistApiModel, PlaylistApiModel, TrackApiModel,
+};
 
 use crate::services;
 
-/// Checks the two policies every data endpoint here carries.
-///
-/// Returns the refusal to send, or `None` when the caller may proceed.
-fn refuse(principal: &Principal) -> Option<Response> {
-    principal
-        .authorize(&read_scoped(policies::MUSIC_READ))
-        .err()
-        .map(axum::response::IntoResponse::into_response)
-}
+/// What every handler here returns.
+type Answer<T> = Result<Json<T>, ApiError>;
+
+/// The caller, once both policies have passed.
+type Caller = Authorized<MusicRead>;
 
 /// Adds a collection route under both the slashed and unslashed spellings.
 fn collection<H, T>(router: Router<AppState>, path: &str, handler: H) -> Router<AppState>
@@ -71,35 +78,23 @@ pub(crate) fn routes() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 async fn album_by_id(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    item_response(services::album_by_id(&state, id).await)
+) -> Answer<AlbumApiModel> {
+    found(services::album_by_id(&state, id).await?)
 }
 
-async fn all_albums(principal: Principal, State(state): State<AppState>) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::all_albums(&state).await)
+async fn all_albums(_caller: Caller, State(state): State<AppState>) -> Answer<Vec<AlbumApiModel>> {
+    Ok(Json(services::all_albums(&state).await?))
 }
 
 async fn albums_by_artist(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::albums_by_artist(&state, id).await)
+) -> Answer<Vec<AlbumApiModel>> {
+    Ok(Json(services::albums_by_artist(&state, id).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -107,23 +102,18 @@ async fn albums_by_artist(
 // ---------------------------------------------------------------------------
 
 async fn artist_by_id(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    item_response(services::artist_by_id(&state, id).await)
+) -> Answer<ArtistApiModel> {
+    found(services::artist_by_id(&state, id).await?)
 }
 
-async fn all_artists(principal: Principal, State(state): State<AppState>) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::all_artists(&state).await)
+async fn all_artists(
+    _caller: Caller,
+    State(state): State<AppState>,
+) -> Answer<Vec<ArtistApiModel>> {
+    Ok(Json(services::all_artists(&state).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -131,23 +121,18 @@ async fn all_artists(principal: Principal, State(state): State<AppState>) -> Res
 // ---------------------------------------------------------------------------
 
 async fn playlist_by_id(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    item_response(services::playlist_by_id(&state, id).await)
+) -> Answer<PlaylistApiModel> {
+    found(services::playlist_by_id(&state, id).await?)
 }
 
-async fn all_playlists(principal: Principal, State(state): State<AppState>) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::all_playlists(&state).await)
+async fn all_playlists(
+    _caller: Caller,
+    State(state): State<AppState>,
+) -> Answer<Vec<PlaylistApiModel>> {
+    Ok(Json(services::all_playlists(&state).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -155,93 +140,61 @@ async fn all_playlists(principal: Principal, State(state): State<AppState>) -> R
 // ---------------------------------------------------------------------------
 
 async fn track_by_id(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    item_response(services::track_by_id(&state, id).await)
+) -> Answer<TrackApiModel> {
+    found(services::track_by_id(&state, id).await?)
 }
 
-async fn all_tracks(principal: Principal, State(state): State<AppState>) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::all_tracks(&state).await)
+async fn all_tracks(_caller: Caller, State(state): State<AppState>) -> Answer<Vec<TrackApiModel>> {
+    Ok(Json(services::all_tracks(&state).await?))
 }
 
 async fn tracks_by_album(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::tracks_by_album(&state, id).await)
+) -> Answer<Vec<TrackApiModel>> {
+    Ok(Json(services::tracks_by_album(&state, id).await?))
 }
 
 async fn tracks_by_artist(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::tracks_by_artist(&state, id).await)
+) -> Answer<Vec<TrackApiModel>> {
+    Ok(Json(services::tracks_by_artist(&state, id).await?))
 }
 
 async fn tracks_by_genre(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::tracks_by_genre(&state, id).await)
+) -> Answer<Vec<TrackApiModel>> {
+    Ok(Json(services::tracks_by_genre(&state, id).await?))
 }
 
 async fn tracks_by_media_type(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::tracks_by_media_type(&state, id).await)
+) -> Answer<Vec<TrackApiModel>> {
+    Ok(Json(services::tracks_by_media_type(&state, id).await?))
 }
 
 async fn tracks_by_playlist(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::tracks_by_playlist(&state, id).await)
+) -> Answer<Vec<TrackApiModel>> {
+    Ok(Json(services::tracks_by_playlist(&state, id).await?))
 }
 
 async fn tracks_by_invoice(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::tracks_by_invoice(&state, id).await)
+) -> Answer<Vec<TrackApiModel>> {
+    Ok(Json(services::tracks_by_invoice(&state, id).await?))
 }

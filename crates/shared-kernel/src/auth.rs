@@ -17,13 +17,15 @@
 //! side depending on the other.
 
 use std::collections::HashSet;
+use std::marker::PhantomData;
+use std::ops::Deref;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 
 use crate::ProblemDetails;
-use crate::errors::{new_trace_id, status_code_page};
+use crate::errors::{ApiError, current_trace_id, status_code_page};
 
 /// The header the tenant guard reads.
 pub const TENANT_HEADER: &str = "X-Tenant-Id";
@@ -141,7 +143,7 @@ pub enum AuthorizationFailure {
 /// while a protected endpoint reached without a token answers 401 with one.
 #[must_use]
 pub fn unauthorized() -> Response {
-    status_code_page(axum::http::StatusCode::UNAUTHORIZED, new_trace_id()).into_response()
+    status_code_page(axum::http::StatusCode::UNAUTHORIZED, current_trace_id()).into_response()
 }
 
 impl IntoResponse for AuthorizationFailure {
@@ -151,7 +153,7 @@ impl IntoResponse for AuthorizationFailure {
             Self::Forbidden => axum::http::StatusCode::FORBIDDEN,
         };
 
-        let mut response = status_code_page(status, new_trace_id()).into_response();
+        let mut response = status_code_page(status, current_trace_id()).into_response();
 
         if self == Self::Unauthenticated {
             // The JWT challenge writes this; verified on the running service.
@@ -172,7 +174,16 @@ impl From<AuthorizationFailure> for ProblemDetails {
             AuthorizationFailure::Forbidden => axum::http::StatusCode::FORBIDDEN,
         };
 
-        status_code_page(status, new_trace_id())
+        status_code_page(status, current_trace_id())
+    }
+}
+
+impl From<AuthorizationFailure> for ApiError {
+    fn from(failure: AuthorizationFailure) -> Self {
+        match failure {
+            AuthorizationFailure::Unauthenticated => Self::Unauthenticated,
+            AuthorizationFailure::Forbidden => Self::Forbidden,
+        }
     }
 }
 
@@ -327,6 +338,173 @@ pub fn read_scoped(permission: &'static str) -> Vec<Requirement> {
         Requirement::Permission(permission),
         Requirement::TenantScope,
     ]
+}
+
+/// A named set of requirements a route carries.
+///
+/// The C# original spells these out at the route, chaining
+/// `RequireAuthorization("music.read").RequireAuthorization("tenant.scoped")`,
+/// and the framework runs them before the handler. This is the equivalent: one
+/// unit type per policy, named at the *handler's argument list* instead, where
+/// the compiler can see it.
+pub trait Policy: Send + Sync + 'static {
+    /// Every requirement a caller must satisfy. All of them, as in the original.
+    const REQUIREMENTS: &'static [Requirement];
+
+    /// What to call this policy in a log record.
+    const NAME: &'static str;
+}
+
+/// The policies the application's routes actually carry.
+///
+/// Each is a unit type used only as the parameter of [`Authorized`].
+pub mod guards {
+    use super::{ADMIN_ROLE, Policy, Requirement, policies};
+
+    /// Any authenticated caller. Port of a bare `RequireAuthorization()`.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Authenticated;
+
+    impl Policy for Authenticated {
+        const REQUIREMENTS: &'static [Requirement] = &[Requirement::Authenticated];
+        const NAME: &'static str = "authenticated";
+    }
+
+    /// `music.read` plus `tenant.scoped`.
+    #[derive(Debug, Clone, Copy)]
+    pub struct MusicRead;
+
+    impl Policy for MusicRead {
+        const REQUIREMENTS: &'static [Requirement] = &[
+            Requirement::Permission(policies::MUSIC_READ),
+            Requirement::TenantScope,
+        ];
+        const NAME: &'static str = policies::MUSIC_READ;
+    }
+
+    /// `orders.read` plus `tenant.scoped`.
+    #[derive(Debug, Clone, Copy)]
+    pub struct OrdersRead;
+
+    impl Policy for OrdersRead {
+        const REQUIREMENTS: &'static [Requirement] = &[
+            Requirement::Permission(policies::ORDERS_READ),
+            Requirement::TenantScope,
+        ];
+        const NAME: &'static str = policies::ORDERS_READ;
+    }
+
+    /// The three Administration reads stack: role, permission, tenant.
+    #[derive(Debug, Clone, Copy)]
+    pub struct AdministrationRead;
+
+    impl Policy for AdministrationRead {
+        const REQUIREMENTS: &'static [Requirement] = &[
+            Requirement::Role(ADMIN_ROLE),
+            Requirement::Permission(policies::ADMINISTRATION_READ),
+            Requirement::TenantScope,
+        ];
+        const NAME: &'static str = policies::ADMINISTRATION_READ;
+    }
+
+    /// The same three, with the write permission in place of the read one.
+    #[derive(Debug, Clone, Copy)]
+    pub struct AdministrationWrite;
+
+    impl Policy for AdministrationWrite {
+        const REQUIREMENTS: &'static [Requirement] = &[
+            Requirement::Role(ADMIN_ROLE),
+            Requirement::Permission(policies::ADMINISTRATION_WRITE),
+            Requirement::TenantScope,
+        ];
+        const NAME: &'static str = policies::ADMINISTRATION_WRITE;
+    }
+}
+
+/// A caller who has already satisfied `P`.
+///
+/// This is the type that closes the "forgot the check" hole. A handler that
+/// wants the caller names `Authorized<MusicRead>` in its arguments, and the
+/// only way to obtain one is for the extractor below to have run every
+/// requirement first — so an endpoint cannot be written that reads data without
+/// being authorized, and one that omits the guard has no caller to read.
+///
+/// The previous shape had each handler open with `if let Some(refusal) =
+/// refuse(&principal) { return refusal; }`. Nothing but review caught a handler
+/// that left the line out.
+pub struct Authorized<P: Policy> {
+    user: AuthenticatedUser,
+    request_tenant: Option<String>,
+    policy: PhantomData<fn() -> P>,
+}
+
+impl<P: Policy> Authorized<P> {
+    /// Builds one directly, for tests.
+    ///
+    /// Deliberately not a general constructor: outside tests the extractor is
+    /// the only way to get one, which is the whole point.
+    #[must_use]
+    pub fn for_test(user: AuthenticatedUser, request_tenant: Option<String>) -> Self {
+        Self {
+            user,
+            request_tenant,
+            policy: PhantomData,
+        }
+    }
+
+    /// The caller.
+    #[must_use]
+    pub fn user(&self) -> &AuthenticatedUser {
+        &self.user
+    }
+
+    /// The tenant this request named, if any.
+    #[must_use]
+    pub fn request_tenant(&self) -> Option<&str> {
+        self.request_tenant.as_deref()
+    }
+}
+
+impl<P: Policy> Deref for Authorized<P> {
+    type Target = AuthenticatedUser;
+
+    fn deref(&self) -> &Self::Target {
+        &self.user
+    }
+}
+
+impl<P: Policy> std::fmt::Debug for Authorized<P> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Authorized")
+            .field("policy", &P::NAME)
+            .field("subject", &self.user.subject)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S, P> FromRequestParts<S> for Authorized<P>
+where
+    S: Send + Sync,
+    P: Policy,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let principal = Principal::from_request_parts(parts, state).await?;
+
+        match principal.authorize(P::REQUIREMENTS) {
+            Ok(user) => Ok(Self {
+                user: user.clone(),
+                request_tenant: principal.request_tenant.clone(),
+                policy: PhantomData,
+            }),
+            Err(failure) => {
+                tracing::debug!(policy = P::NAME, ?failure, "authorization refused");
+                Err(failure.into())
+            }
+        }
+    }
 }
 
 /// Collapses duplicate values while preserving order.
@@ -495,6 +673,151 @@ mod tests {
         assert_eq!(
             principal.authorize(&[Requirement::TenantScope]),
             Err(AuthorizationFailure::Forbidden)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The `Authorized<P>` extractor
+    // -----------------------------------------------------------------------
+
+    /// A router whose one route can only be reached through the extractor.
+    ///
+    /// The handler takes nothing else, so if it runs at all the policy passed.
+    fn guarded<P: Policy>() -> axum::Router {
+        axum::Router::new().route(
+            "/",
+            axum::routing::get(|caller: Authorized<P>| async move { caller.subject.clone() }),
+        )
+    }
+
+    async fn call<P: Policy>(
+        principal: Option<AuthenticatedUser>,
+        tenant: Option<&str>,
+    ) -> axum::http::Response<axum::body::Body> {
+        use tower::ServiceExt;
+
+        let mut builder = axum::http::Request::builder().uri("/");
+        if let Some(tenant) = tenant {
+            builder = builder.header(TENANT_HEADER, tenant);
+        }
+
+        let mut request = builder
+            .body(axum::body::Body::empty())
+            .expect("the request should build");
+
+        if let Some(principal) = principal {
+            request.extensions_mut().insert(principal);
+        }
+
+        guarded::<P>()
+            .oneshot(request)
+            .await
+            .expect("the router should answer")
+    }
+
+    #[tokio::test]
+    async fn the_extractor_turns_an_anonymous_caller_away_with_a_challenge() {
+        let response = call::<guards::MusicRead>(None, None).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer"),
+            "a protected endpoint's 401 carries the challenge"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::errors::PROBLEM_JSON)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_extractor_refuses_a_caller_holding_the_wrong_permission() {
+        let response = call::<guards::OrdersRead>(Some(user()), None).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn the_handler_runs_only_once_every_requirement_has_passed() {
+        let response = call::<guards::MusicRead>(Some(user()), None).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the body should read");
+
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            "user-1",
+            "the handler received the caller the extractor validated"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_extractor_applies_the_tenant_header_the_same_way_the_guard_does() {
+        assert_eq!(
+            call::<guards::MusicRead>(Some(user()), Some("tenant-1"))
+                .await
+                .status(),
+            axum::http::StatusCode::OK
+        );
+        assert_eq!(
+            call::<guards::MusicRead>(Some(user()), Some("tenant-2"))
+                .await
+                .status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn the_administration_policies_stay_distinct_through_the_extractor() {
+        let reader = AuthenticatedUser {
+            permissions: vec![policies::ADMINISTRATION_READ.to_owned()],
+            ..admin()
+        };
+
+        assert_eq!(
+            call::<guards::AdministrationRead>(Some(reader.clone()), None)
+                .await
+                .status(),
+            axum::http::StatusCode::OK
+        );
+        assert_eq!(
+            call::<guards::AdministrationWrite>(Some(reader), None)
+                .await
+                .status(),
+            axum::http::StatusCode::FORBIDDEN,
+            "the read permission must not open a write route"
+        );
+    }
+
+    #[test]
+    fn every_guard_declares_the_requirements_its_helper_builds() {
+        // The helpers are what the routes used before the extractor existed;
+        // a guard that drifted from one would silently relax a route.
+        assert_eq!(
+            guards::MusicRead::REQUIREMENTS,
+            read_scoped(policies::MUSIC_READ)
+        );
+        assert_eq!(
+            guards::OrdersRead::REQUIREMENTS,
+            read_scoped(policies::ORDERS_READ)
+        );
+        assert_eq!(
+            guards::AdministrationRead::REQUIREMENTS,
+            administration_read()
+        );
+        assert_eq!(
+            guards::AdministrationWrite::REQUIREMENTS,
+            administration_write()
         );
     }
 

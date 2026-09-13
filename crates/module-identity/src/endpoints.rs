@@ -8,14 +8,19 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use shared_kernel::auth::unauthorized;
-use shared_kernel::errors::{default_problem_type, new_trace_id};
-use shared_kernel::{AuthorizationFailure, Principal, ProblemDetails, Requirement};
+use shared_kernel::errors::{current_trace_id, default_problem_type};
+use shared_kernel::guards::Authenticated;
+use shared_kernel::{ApiError, Authorized, ProblemDetails, REDACTED};
 
 use crate::runtime::IdentityRuntime;
 use crate::tokens::TokenPair;
 
 /// The login request body. Member names are lowercase, as the record declares.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// A rejected login is logged, and the natural thing to log is the request.
+/// `Debug` therefore keeps the username, which is what makes the record useful,
+/// and drops the password, which is what makes it dangerous.
+#[derive(Clone, Deserialize)]
 pub struct LoginRequest {
     /// The login name.
     #[serde(default)]
@@ -25,8 +30,18 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+impl std::fmt::Debug for LoginRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LoginRequest")
+            .field("username", &self.username)
+            .field("password", &REDACTED)
+            .finish()
+    }
+}
+
 /// The refresh request body.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct RefreshRequest {
     /// The user whose token is being exchanged.
     #[serde(default, rename = "userId")]
@@ -36,8 +51,18 @@ pub struct RefreshRequest {
     pub refresh_token: String,
 }
 
+impl std::fmt::Debug for RefreshRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RefreshRequest")
+            .field("user_id", &self.user_id)
+            .field("refresh_token", &REDACTED)
+            .finish()
+    }
+}
+
 /// The logout request body.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct LogoutRequest {
     /// The user whose token is being revoked.
     #[serde(default, rename = "userId")]
@@ -47,11 +72,21 @@ pub struct LogoutRequest {
     pub refresh_token: String,
 }
 
+impl std::fmt::Debug for LogoutRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LogoutRequest")
+            .field("user_id", &self.user_id)
+            .field("refresh_token", &REDACTED)
+            .finish()
+    }
+}
+
 /// The token envelope.
 ///
 /// Snake-case members, unlike the PascalCase API models — these come from a C#
 /// anonymous object and the host's naming policy leaves both alone.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct TokenResponse {
     /// The signed JWT.
     pub access_token: String,
@@ -65,6 +100,18 @@ pub struct TokenResponse {
     pub expires_at_utc: String,
     /// The opaque refresh token.
     pub refresh_token: String,
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokenResponse")
+            .field("access_token", &REDACTED)
+            .field("token_type", &self.token_type)
+            .field("expires_at_utc", &self.expires_at_utc)
+            .field("refresh_token", &REDACTED)
+            .finish()
+    }
 }
 
 impl TokenResponse {
@@ -112,7 +159,7 @@ fn invalid_request(detail: &str) -> ProblemDetails {
         detail: Some(detail.to_owned()),
         instance: None,
         errors: None,
-        trace_id: new_trace_id(),
+        trace_id: current_trace_id(),
     }
 }
 
@@ -148,9 +195,9 @@ where
         .route(
             "/logout",
             post(
-                move |principal: Principal, Json(request): Json<LogoutRequest>| {
+                move |caller: Authorized<Authenticated>, Json(request): Json<LogoutRequest>| {
                     let runtime = Arc::clone(&logout);
-                    async move { handle_logout(&runtime, &principal, request) }
+                    async move { handle_logout(&runtime, &caller, request) }
                 },
             ),
         )
@@ -186,7 +233,7 @@ fn handle_login(runtime: &IdentityRuntime, request: LoginRequest) -> Response {
         Ok(pair) => Json(TokenResponse::from_pair(pair)).into_response(),
         Err(error) => {
             tracing::error!(%error, "could not issue a token");
-            ProblemDetails::internal_server_error(new_trace_id()).into_response()
+            ProblemDetails::internal_server_error(current_trace_id()).into_response()
         }
     }
 }
@@ -210,22 +257,17 @@ fn handle_refresh(runtime: &IdentityRuntime, request: RefreshRequest) -> Respons
 
 fn handle_logout(
     runtime: &IdentityRuntime,
-    principal: &Principal,
+    caller: &Authorized<Authenticated>,
     request: LogoutRequest,
-) -> Response {
-    let user = match principal.authorize(&[Requirement::Authenticated]) {
-        Ok(user) => user,
-        Err(failure) => return failure.into_response(),
-    };
-
+) -> Result<StatusCode, ApiError> {
     // A caller may only revoke their own session.
-    if user.subject != request.user_id {
+    if caller.subject != request.user_id {
         tracing::warn!(
-            authenticated = %user.subject,
+            authenticated = %caller.subject,
             requested = %request.user_id,
             "logout ownership mismatch"
         );
-        return AuthorizationFailure::Forbidden.into_response();
+        return Err(ApiError::Forbidden);
     }
 
     runtime
@@ -233,7 +275,7 @@ fn handle_logout(
         .revoke(&request.user_id, &request.refresh_token);
     tracing::info!(user_id = %request.user_id, "user logged out");
 
-    StatusCode::NO_CONTENT.into_response()
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The `userinfo` payload. Lowercase members, from an anonymous object.
@@ -246,18 +288,14 @@ struct UserInfoResponse {
     permissions: Vec<String>,
 }
 
-async fn handle_userinfo(principal: Principal) -> Response {
-    match principal.authorize(&[Requirement::Authenticated]) {
-        Ok(user) => Json(UserInfoResponse {
-            sub: user.subject.clone(),
-            name: user.name.clone(),
-            email: user.email.clone(),
-            roles: user.roles.clone(),
-            permissions: user.permissions.clone(),
-        })
-        .into_response(),
-        Err(failure) => failure.into_response(),
-    }
+async fn handle_userinfo(caller: Authorized<Authenticated>) -> Json<UserInfoResponse> {
+    Json(UserInfoResponse {
+        sub: caller.subject.clone(),
+        name: caller.name.clone(),
+        email: caller.email.clone(),
+        roles: caller.roles.clone(),
+        permissions: caller.permissions.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -314,6 +352,52 @@ mod tests {
                 "refresh_token": "opaque"
             })
         );
+    }
+
+    #[test]
+    fn a_failed_login_can_be_logged_without_logging_the_password() {
+        // The handler warns on a rejected login, and `?request` is the obvious
+        // thing to put in that record.
+        let request = LoginRequest {
+            username: "demo".to_owned(),
+            password: "hunter2".to_owned(),
+        };
+
+        let rendered = format!("{request:?}");
+
+        assert!(rendered.contains("demo"), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+    }
+
+    #[test]
+    fn neither_token_body_prints_the_token_it_carries() {
+        let refresh = RefreshRequest {
+            user_id: "user-1".to_owned(),
+            refresh_token: "an-opaque-credential".to_owned(),
+        };
+        let logout = LogoutRequest {
+            user_id: "user-1".to_owned(),
+            refresh_token: "an-opaque-credential".to_owned(),
+        };
+        let response = TokenResponse {
+            access_token: "header.payload.signature".to_owned(),
+            token_type: "Bearer".to_owned(),
+            expires_at_utc: "2026-09-11T23:09:46.900751+00:00".to_owned(),
+            refresh_token: "an-opaque-credential".to_owned(),
+        };
+
+        for rendered in [
+            format!("{refresh:?}"),
+            format!("{logout:?}"),
+            format!("{response:?}"),
+        ] {
+            assert!(!rendered.contains("an-opaque-credential"), "{rendered}");
+            assert!(!rendered.contains("header.payload.signature"), "{rendered}");
+            assert!(
+                rendered.contains("user-1") || rendered.contains("Bearer"),
+                "{rendered}"
+            );
+        }
     }
 
     #[test]

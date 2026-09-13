@@ -21,6 +21,8 @@ rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# For the request-scoped trace identifier, which is a task-local.
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

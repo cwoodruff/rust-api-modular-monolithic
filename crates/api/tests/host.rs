@@ -556,3 +556,108 @@ async fn a_rejected_request_still_carries_the_security_headers() {
         "the headers layer sits outside the limiter"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Trace identifiers
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn every_response_carries_a_trace_identifier() {
+    let app = development_app().await;
+
+    for uri in ["/", "/api/music/health", "/no-such-route"] {
+        let response = get(&app, uri).await;
+        let header = response
+            .header("x-trace-id")
+            .unwrap_or_else(|| panic!("{uri} should carry a trace identifier"));
+
+        let segments: Vec<&str> = header.split('-').collect();
+        assert_eq!(segments.len(), 4, "{uri}: {header}");
+        assert_eq!(segments[1].len(), 32, "{uri}: {header}");
+    }
+}
+
+#[tokio::test]
+async fn the_trace_identifier_in_the_body_is_the_one_in_the_header() {
+    // The whole point of the field. Before the request-id layer every
+    // response-building path minted its own, so the identifier a client was
+    // shown matched nothing at all.
+    let app = development_app().await;
+    let response = get(&app, "/no-such-route").await;
+
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.json()["traceId"].as_str().map(ToOwned::to_owned),
+        response.header("x-trace-id"),
+        "the document and the header must name the same trace"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_request_reports_the_same_trace_in_both_places() {
+    // This one is raised by an extractor rather than by a middleware, which is
+    // a different path to the same document.
+    let app = development_app().await;
+    let response = get(&app, "/api/music/albums/1").await;
+
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.json()["traceId"].as_str().map(ToOwned::to_owned),
+        response.header("x-trace-id")
+    );
+}
+
+#[tokio::test]
+async fn two_requests_get_two_identifiers() {
+    let app = development_app().await;
+
+    let first = get(&app, "/").await.header("x-trace-id");
+    let second = get(&app, "/").await.header("x-trace-id");
+
+    assert!(first.is_some());
+    assert_ne!(first, second);
+}
+
+#[tokio::test]
+async fn a_callers_own_traceparent_is_continued_rather_than_replaced() {
+    let app = development_app().await;
+    let upstream = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    let request = Request::builder()
+        .uri("/no-such-route")
+        .header("traceparent", upstream)
+        .body(Body::empty())
+        .expect("the request should build");
+
+    let response = send(&app, request).await;
+
+    assert_eq!(response.header("x-trace-id").as_deref(), Some(upstream));
+    assert_eq!(response.json()["traceId"], upstream);
+}
+
+#[tokio::test]
+async fn a_nonsense_traceparent_is_ignored_rather_than_echoed() {
+    // An inbound header is caller-controlled. Echoing an arbitrary string into
+    // the logs as though the service had minted it is how log injection starts.
+    let app = development_app().await;
+
+    for nonsense in [
+        "not-a-traceparent",
+        "",
+        "00-0000000000000000000000000000000-x-00",
+    ] {
+        let request = Request::builder()
+            .uri("/no-such-route")
+            .header("traceparent", nonsense)
+            .body(Body::empty())
+            .expect("the request should build");
+
+        let response = send(&app, request).await;
+        let issued = response
+            .header("x-trace-id")
+            .expect("an identifier should still be issued");
+
+        assert_ne!(issued, nonsense, "{nonsense:?} should not have been echoed");
+        assert_eq!(issued.split('-').count(), 4, "{issued}");
+    }
+}

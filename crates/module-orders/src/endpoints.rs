@@ -1,20 +1,30 @@
 //! The Orders module's routes, ported from its two endpoint classes.
 //!
 //! Every data endpoint stacks `orders.read` and `tenant.scoped`; the health
-//! endpoints stay anonymous. Collection routes are registered under both the
-//! slashed and unslashed spellings, for the reason the Music module's
-//! endpoints explain.
+//! endpoints stay anonymous. Both requirements are carried by the
+//! [`Authorized<OrdersRead>`] each handler takes, so a handler cannot reach the
+//! service layer without them having passed — see the Music module's endpoints
+//! for why that replaced a per-body check.
+//!
+//! Collection routes are registered under both the slashed and unslashed
+//! spellings, for the reason the Music module's endpoints explain.
 
-use axum::Router;
 use axum::extract::{Path, State};
-use axum::response::Response;
 use axum::routing::get;
-use shared_kernel::Principal;
-use shared_kernel::auth::{policies, read_scoped};
-use shared_kernel::data::{collection_response, item_response};
+use axum::{Json, Router};
+use shared_kernel::data::found;
+use shared_kernel::guards::OrdersRead;
+use shared_kernel::{ApiError, Authorized};
 use shared_persistence::AppState;
+use shared_persistence::api_models::{InvoiceApiModel, InvoiceLineApiModel};
 
 use crate::services;
+
+/// What every handler here returns.
+type Answer<T> = Result<Json<T>, ApiError>;
+
+/// The caller, once both policies have passed.
+type Caller = Authorized<OrdersRead>;
 
 /// The shape `GET /invoice-lines/{id}` returns.
 ///
@@ -43,16 +53,6 @@ impl From<shared_persistence::entities::InvoiceLine> for InvoiceLineEntityRespon
     }
 }
 
-/// Checks the two policies every data endpoint here carries.
-///
-/// Returns the refusal to send, or `None` when the caller may proceed.
-fn refuse(principal: &Principal) -> Option<Response> {
-    principal
-        .authorize(&read_scoped(policies::ORDERS_READ))
-        .err()
-        .map(axum::response::IntoResponse::into_response)
-}
-
 /// Adds a collection route under both the slashed and unslashed spellings.
 fn collection<H, T>(router: Router<AppState>, path: &str, handler: H) -> Router<AppState>
 where
@@ -79,82 +79,60 @@ pub(crate) fn routes() -> Router<AppState> {
 }
 
 async fn invoice_by_id(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    item_response(services::invoice_by_id(&state, id).await)
+) -> Answer<InvoiceApiModel> {
+    found(services::invoice_by_id(&state, id).await?)
 }
 
-async fn all_invoices(principal: Principal, State(state): State<AppState>) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::all_invoices(&state).await)
+async fn all_invoices(
+    _caller: Caller,
+    State(state): State<AppState>,
+) -> Answer<Vec<InvoiceApiModel>> {
+    Ok(Json(services::all_invoices(&state).await?))
 }
 
 async fn invoices_by_customer(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::invoices_by_customer(&state, id).await)
+) -> Answer<Vec<InvoiceApiModel>> {
+    Ok(Json(services::invoices_by_customer(&state, id).await?))
 }
 
 /// The one endpoint that serves an entity shape rather than an API model.
 async fn invoice_line_by_id(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    item_response(
+) -> Answer<InvoiceLineEntityResponse> {
+    found(
         services::invoice_line_by_id(&state, id)
-            .await
-            .map(|line| line.map(InvoiceLineEntityResponse::from)),
+            .await?
+            .map(InvoiceLineEntityResponse::from),
     )
 }
 
-async fn all_invoice_lines(principal: Principal, State(state): State<AppState>) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::all_invoice_lines(&state).await)
+async fn all_invoice_lines(
+    _caller: Caller,
+    State(state): State<AppState>,
+) -> Answer<Vec<InvoiceLineApiModel>> {
+    Ok(Json(services::all_invoice_lines(&state).await?))
 }
 
 async fn invoice_lines_by_invoice(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::invoice_lines_by_invoice(&state, id).await)
+) -> Answer<Vec<InvoiceLineApiModel>> {
+    Ok(Json(services::invoice_lines_by_invoice(&state, id).await?))
 }
 
 async fn invoice_lines_by_track(
-    principal: Principal,
+    _caller: Caller,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::invoice_lines_by_track(&state, id).await)
+) -> Answer<Vec<InvoiceLineApiModel>> {
+    Ok(Json(services::invoice_lines_by_track(&state, id).await?))
 }

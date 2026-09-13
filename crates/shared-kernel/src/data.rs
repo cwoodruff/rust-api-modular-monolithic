@@ -6,29 +6,32 @@
 //! see it where they expect to.
 
 use axum::Json;
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
 
 use crate::ProblemDetails;
-use crate::errors::new_trace_id;
+use crate::errors::{ApiError, current_trace_id};
 
 /// Something went wrong talking to the database.
 ///
-/// The driver's own error type is boxed because neither this crate nor the
+/// The driver's own error type is erased because neither this crate nor the
 /// contracts crate may depend on a driver. The C# equivalent is an unhandled
 /// exception, which the host turns into a 500.
-#[derive(Debug, thiserror::Error)]
+///
+/// The cause is held behind an `Arc` rather than a `Box` so this is `Clone`.
+/// The cache facade needs that: when several callers coalesce onto one factory
+/// call and it fails, every one of them has to be handed the failure, and a
+/// boxed error can only be handed to one.
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum RepositoryError {
     /// The underlying database reported a failure.
     #[error("database operation failed")]
-    Database(#[source] Box<dyn std::error::Error + Send + Sync>),
+    Database(#[source] std::sync::Arc<dyn std::error::Error + Send + Sync>),
 }
 
 impl RepositoryError {
     /// Wraps a driver error.
     pub fn database(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
-        Self::Database(source.into())
+        Self::Database(std::sync::Arc::from(source.into()))
     }
 
     /// The 500 the host returns, leaking nothing about the cause.
@@ -42,7 +45,7 @@ impl RepositoryError {
 
 impl IntoResponse for RepositoryError {
     fn into_response(self) -> Response {
-        self.into_problem(new_trace_id()).into_response()
+        self.into_problem(current_trace_id()).into_response()
     }
 }
 
@@ -52,27 +55,14 @@ pub type RepositoryResult<T> = Result<T, RepositoryError>;
 /// Renders a by-id lookup.
 ///
 /// Port of `album is not null ? TypedResults.Ok(album) : Results.NotFound()`.
-/// The 404 carries no body of its own — the status-code-pages layer fills in
-/// the problem document, exactly as it does in the original.
-pub fn item_response<T: Serialize>(result: RepositoryResult<Option<T>>) -> Response {
-    match result {
-        Ok(Some(value)) => Json(value).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(error) => error.into_response(),
-    }
-}
-
-/// Renders a collection lookup.
+/// The 404 carries the document the status-code-pages layer would have written
+/// for a bodiless one, so the wire output is what it always was.
 ///
-/// Always 200, even when empty. The original's endpoints declare a 404 here,
-/// but `Results.Json(...)` cannot produce one — an empty result is an empty
-/// array. That declaration is documentation-only, and this reproduces the
-/// behavior rather than the declaration.
-pub fn collection_response<T: Serialize>(result: RepositoryResult<Vec<T>>) -> Response {
-    match result {
-        Ok(values) => Json(values).into_response(),
-        Err(error) => error.into_response(),
-    }
+/// # Errors
+///
+/// [`ApiError::NotFound`] when the lookup found nothing.
+pub fn found<T>(value: Option<T>) -> Result<Json<T>, ApiError> {
+    value.map(Json).ok_or(ApiError::NotFound)
 }
 
 #[cfg(test)]
@@ -103,39 +93,25 @@ mod tests {
     }
 
     #[test]
-    fn a_found_item_is_serialized_and_a_missing_one_is_a_bodiless_404() {
-        let found = item_response(Ok(Some(serde_json::json!({ "Id": 1 }))));
-        assert_eq!(found.status(), StatusCode::OK);
+    fn a_found_item_is_serialized_and_a_missing_one_is_the_originals_404() {
+        let present = found(Some(serde_json::json!({ "Id": 1 })))
+            .expect("a present value should not be an error")
+            .into_response();
+        assert_eq!(present.status(), axum::http::StatusCode::OK);
 
-        let missing = item_response::<serde_json::Value>(Ok(None));
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-        assert!(
-            !missing
-                .headers()
-                .contains_key(axum::http::header::CONTENT_TYPE),
-            "the status-code-pages layer supplies the body, not the handler"
-        );
+        let missing = found::<serde_json::Value>(None)
+            .expect_err("a missing value should be a 404")
+            .into_problem("trace-1");
+
+        assert_eq!(missing.status, 404);
+        assert_eq!(missing.title, "Not Found");
     }
 
     #[test]
-    fn an_empty_collection_is_still_a_200() {
-        // The endpoints declare a 404 for collections, but the original cannot
-        // produce one: an empty result is an empty array.
-        let response = collection_response::<serde_json::Value>(Ok(Vec::new()));
+    fn a_repository_failure_becomes_the_bodiless_500() {
+        let problem = ApiError::from(RepositoryError::database("boom")).into_problem("trace-1");
 
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[test]
-    fn a_failure_becomes_a_500_on_both_paths() {
-        assert_eq!(
-            item_response::<serde_json::Value>(Err(RepositoryError::database("boom"))).status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-        assert_eq!(
-            collection_response::<serde_json::Value>(Err(RepositoryError::database("boom")))
-                .status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
+        assert_eq!(problem.status, 500);
+        assert_eq!(problem.detail, None);
     }
 }

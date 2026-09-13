@@ -96,6 +96,15 @@ failure becomes a 500 the way an unhandled exception does in the original.
 Nothing is cached when the factory fails, and `None` is never cached either: a
 404 must not pin a negative result for twenty minutes.
 
+The failure reaches **every** caller that coalesced onto that factory call, not
+just the one that ran it. Both "the factory failed" and "the factory found
+nothing" travel as the cache's own error, because both mean the same thing to
+it — do not store this — and `try_get_with` hands its error to everyone waiting
+on the key. An earlier version parked the error in a `Mutex` beside the call,
+where only the caller that ran the factory looked: the rest were handed the
+cache's `None`, which the services turn into a 404 or an empty array. A database
+outage read as *missing data* for every concurrent request but one.
+
 ## Configuration
 
 The full `Caching` section binds, including the members nothing reads, so an

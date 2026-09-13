@@ -82,11 +82,7 @@ impl Repository<Customer> for SqliteCustomerRepository {
     }
 
     async fn update(&self, entity: Customer) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
-
-        sqlx::query(
+        let updated = sqlx::query(
             r#"UPDATE "Customer" SET "FirstName" = ?, "LastName" = ?, "Company" = ?, "Address" = ?,
                                      "City" = ?, "State" = ?, "Country" = ?, "PostalCode" = ?,
                                      "Phone" = ?, "Fax" = ?, "Email" = ?, "SupportRepId" = ?
@@ -109,7 +105,7 @@ impl Repository<Customer> for SqliteCustomerRepository {
         .await
         .map_err(common::database)?;
 
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {
@@ -301,8 +297,8 @@ impl Repository<Employee> for SqliteEmployeeRepository {
         .bind(&entity.first_name)
         .bind(&entity.title)
         .bind(entity.reports_to)
-        .bind(entity.birth_date)
-        .bind(entity.hire_date)
+        .bind(rows::timestamp_text(entity.birth_date))
+        .bind(rows::timestamp_text(entity.hire_date))
         .bind(&entity.address)
         .bind(&entity.city)
         .bind(&entity.state)
@@ -319,11 +315,7 @@ impl Repository<Employee> for SqliteEmployeeRepository {
     }
 
     async fn update(&self, entity: Employee) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
-
-        sqlx::query(
+        let updated = sqlx::query(
             r#"UPDATE "Employee" SET "LastName" = ?, "FirstName" = ?, "Title" = ?, "ReportsTo" = ?,
                                      "BirthDate" = ?, "HireDate" = ?, "Address" = ?, "City" = ?,
                                      "State" = ?, "Country" = ?, "PostalCode" = ?, "Phone" = ?,
@@ -334,8 +326,8 @@ impl Repository<Employee> for SqliteEmployeeRepository {
         .bind(&entity.first_name)
         .bind(&entity.title)
         .bind(entity.reports_to)
-        .bind(entity.birth_date)
-        .bind(entity.hire_date)
+        .bind(rows::timestamp_text(entity.birth_date))
+        .bind(rows::timestamp_text(entity.hire_date))
         .bind(&entity.address)
         .bind(&entity.city)
         .bind(&entity.state)
@@ -349,7 +341,7 @@ impl Repository<Employee> for SqliteEmployeeRepository {
         .await
         .map_err(common::database)?;
 
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {
@@ -484,18 +476,14 @@ impl Repository<Genre> for SqliteGenreRepository {
     }
 
     async fn update(&self, entity: Genre) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
-
-        sqlx::query(r#"UPDATE "Genre" SET "Name" = ? WHERE "Id" = ?"#)
+        let updated = sqlx::query(r#"UPDATE "Genre" SET "Name" = ? WHERE "Id" = ?"#)
             .bind(&entity.name)
             .bind(entity.id)
             .execute(&self.pool)
             .await
             .map_err(common::database)?;
 
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {
@@ -564,18 +552,14 @@ impl Repository<MediaType> for SqliteMediaTypeRepository {
     }
 
     async fn update(&self, entity: MediaType) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
-
-        sqlx::query(r#"UPDATE "MediaType" SET "Name" = ? WHERE "Id" = ?"#)
+        let updated = sqlx::query(r#"UPDATE "MediaType" SET "Name" = ? WHERE "Id" = ?"#)
             .bind(&entity.name)
             .bind(entity.id)
             .execute(&self.pool)
             .await
             .map_err(common::database)?;
 
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {

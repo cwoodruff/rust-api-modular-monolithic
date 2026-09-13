@@ -2,39 +2,37 @@
 //!
 //! This is the one module that stacks **three** policies. Reads require
 //! `role.admin`, `administration.read` and `tenant.scoped`; writes swap the
-//! second for `administration.write`. All three must pass.
+//! second for `administration.write`. All three must pass, and which set a
+//! route carries is visible in its handler's signature — [`Reader`] or
+//! [`Writer`] — rather than in a call at the top of the body that a new
+//! endpoint could be written without.
 //!
 //! It also carries the only writes in the application. Nine other services
 //! expose create and update methods that no route reaches.
 
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::http::{HeaderName, StatusCode, header};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
-use shared_kernel::auth::{administration_read, administration_write};
-use shared_kernel::data::{collection_response, item_response};
-use shared_kernel::{JsonBody, Principal};
+use shared_kernel::data::found;
+use shared_kernel::guards::{AdministrationRead, AdministrationWrite};
+use shared_kernel::{ApiError, Authorized, JsonBody};
 use shared_persistence::AppState;
+use shared_persistence::api_models::{
+    CustomerApiModel, EmployeeApiModel, GenreApiModel, MediaTypeApiModel,
+};
 
 use crate::services;
 
-/// Checks the three policies a read endpoint carries.
-fn refuse_read(principal: &Principal) -> Option<Response> {
-    principal
-        .authorize(&administration_read())
-        .err()
-        .map(IntoResponse::into_response)
-}
+/// What a handler serving a body returns.
+type Answer<T> = Result<Json<T>, ApiError>;
 
-/// Checks the three policies a write endpoint carries.
-fn refuse_write(principal: &Principal) -> Option<Response> {
-    principal
-        .authorize(&administration_write())
-        .err()
-        .map(IntoResponse::into_response)
-}
+/// A caller who has passed the three read policies.
+type Reader = Authorized<AdministrationRead>;
+
+/// A caller who has passed the three write policies.
+type Writer = Authorized<AdministrationWrite>;
 
 /// Adds a collection route under both the slashed and unslashed spellings.
 fn collection<H, T>(router: Router<AppState>, path: &str, handler: H) -> Router<AppState>
@@ -73,35 +71,26 @@ pub(crate) fn routes() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 async fn customer_by_id(
-    principal: Principal,
+    _caller: Reader,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse_read(&principal) {
-        return refusal;
-    }
-
-    item_response(services::customer_by_id(&state, id).await)
+) -> Answer<CustomerApiModel> {
+    found(services::customer_by_id(&state, id).await?)
 }
 
-async fn all_customers(principal: Principal, State(state): State<AppState>) -> Response {
-    if let Some(refusal) = refuse_read(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::all_customers(&state).await)
+async fn all_customers(
+    _caller: Reader,
+    State(state): State<AppState>,
+) -> Answer<Vec<CustomerApiModel>> {
+    Ok(Json(services::all_customers(&state).await?))
 }
 
 async fn customers_by_support_rep(
-    principal: Principal,
+    _caller: Reader,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse_read(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::customers_by_support_rep(&state, id).await)
+) -> Answer<Vec<CustomerApiModel>> {
+    Ok(Json(services::customers_by_support_rep(&state, id).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -109,47 +98,34 @@ async fn customers_by_support_rep(
 // ---------------------------------------------------------------------------
 
 async fn employee_by_id(
-    principal: Principal,
+    _caller: Reader,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse_read(&principal) {
-        return refusal;
-    }
-
-    item_response(services::employee_by_id(&state, id).await)
+) -> Answer<EmployeeApiModel> {
+    found(services::employee_by_id(&state, id).await?)
 }
 
-async fn all_employees(principal: Principal, State(state): State<AppState>) -> Response {
-    if let Some(refusal) = refuse_read(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::all_employees(&state).await)
+async fn all_employees(
+    _caller: Reader,
+    State(state): State<AppState>,
+) -> Answer<Vec<EmployeeApiModel>> {
+    Ok(Json(services::all_employees(&state).await?))
 }
 
 async fn direct_reports(
-    principal: Principal,
+    _caller: Reader,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse_read(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::direct_reports(&state, id).await)
+) -> Answer<Vec<EmployeeApiModel>> {
+    Ok(Json(services::direct_reports(&state, id).await?))
 }
 
 async fn reports_to(
-    principal: Principal,
+    _caller: Reader,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse_read(&principal) {
-        return refusal;
-    }
-
-    item_response(services::reports_to(&state, id).await)
+) -> Answer<EmployeeApiModel> {
+    found(services::reports_to(&state, id).await?)
 }
 
 // ---------------------------------------------------------------------------
@@ -157,23 +133,18 @@ async fn reports_to(
 // ---------------------------------------------------------------------------
 
 async fn media_type_by_id(
-    principal: Principal,
+    _caller: Reader,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse_read(&principal) {
-        return refusal;
-    }
-
-    item_response(services::media_type_by_id(&state, id).await)
+) -> Answer<MediaTypeApiModel> {
+    found(services::media_type_by_id(&state, id).await?)
 }
 
-async fn all_media_types(principal: Principal, State(state): State<AppState>) -> Response {
-    if let Some(refusal) = refuse_read(&principal) {
-        return refusal;
-    }
-
-    collection_response(services::all_media_types(&state).await)
+async fn all_media_types(
+    _caller: Reader,
+    State(state): State<AppState>,
+) -> Answer<Vec<MediaTypeApiModel>> {
+    Ok(Json(services::all_media_types(&state).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -194,97 +165,70 @@ struct GenreRequest {
     name: Option<String>,
 }
 
-async fn genre_by_id(
-    principal: Principal,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse_read(&principal) {
-        return refusal;
-    }
-
-    item_response(services::genre_by_id(&state, id).await)
+/// The lowercase echo `PUT` answers with.
+///
+/// Note the casing against the `POST`, which answers a PascalCase model: one
+/// comes from an anonymous object and the other from an API model, and the
+/// host's naming policy leaves both alone.
+#[derive(Debug, Clone, serde::Serialize)]
+struct GenreEcho {
+    id: i32,
+    name: Option<String>,
 }
 
-async fn all_genres(principal: Principal, State(state): State<AppState>) -> Response {
-    if let Some(refusal) = refuse_read(&principal) {
-        return refusal;
-    }
+async fn genre_by_id(
+    _caller: Reader,
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+) -> Answer<GenreApiModel> {
+    found(services::genre_by_id(&state, id).await?)
+}
 
-    collection_response(services::all_genres(&state).await)
+async fn all_genres(_caller: Reader, State(state): State<AppState>) -> Answer<Vec<GenreApiModel>> {
+    Ok(Json(services::all_genres(&state).await?))
 }
 
 /// `POST /api/admin/genres` — 201 with a `Location` header and the new model.
 async fn create_genre(
-    principal: Principal,
+    _caller: Writer,
     State(state): State<AppState>,
-    body: Result<JsonBody<GenreRequest>, shared_kernel::json::MalformedRequest>,
-) -> Response {
-    if let Some(refusal) = refuse_write(&principal) {
-        return refusal;
-    }
+    JsonBody(request): JsonBody<GenreRequest>,
+) -> Result<(StatusCode, [(HeaderName, String); 1], Json<GenreApiModel>), ApiError> {
+    let created = services::create_genre(&state, request.name).await?;
+    let location = format!("/api/admin/genres/{}", created.id);
 
-    let request = match body {
-        Ok(JsonBody(request)) => request,
-        Err(malformed) => return malformed.into_response(),
-    };
-
-    match services::create_genre(&state, request.name).await {
-        Ok(created) => (
-            StatusCode::CREATED,
-            [(
-                header::LOCATION,
-                format!("/api/admin/genres/{}", created.id),
-            )],
-            Json(created),
-        )
-            .into_response(),
-        Err(failure) => failure.into_response(),
-    }
+    Ok((
+        StatusCode::CREATED,
+        [(header::LOCATION, location)],
+        Json(created),
+    ))
 }
 
 /// `PUT /api/admin/genres/{id}` — 200 with a lowercase echo of the change.
-///
-/// Note the casing: this answers `{"id":…,"name":…}` while the `POST` answers
-/// a PascalCase model. One comes from an anonymous object and the other from
-/// an API model, and the host's naming policy leaves both alone.
 async fn update_genre(
-    principal: Principal,
+    _caller: Writer,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-    body: Result<JsonBody<GenreRequest>, shared_kernel::json::MalformedRequest>,
-) -> Response {
-    if let Some(refusal) = refuse_write(&principal) {
-        return refusal;
-    }
-
-    let request = match body {
-        Ok(JsonBody(request)) => request,
-        Err(malformed) => return malformed.into_response(),
-    };
-
+    JsonBody(request): JsonBody<GenreRequest>,
+) -> Answer<GenreEcho> {
     let name = request.name.clone();
 
-    match services::update_genre(&state, id, request.name).await {
-        Ok(true) => Json(serde_json::json!({ "id": id, "name": name })).into_response(),
-        Ok(false) => StatusCode::NOT_FOUND.into_response(),
-        Err(failure) => failure.into_response(),
+    if services::update_genre(&state, id, request.name).await? {
+        Ok(Json(GenreEcho { id, name }))
+    } else {
+        Err(ApiError::NotFound)
     }
 }
 
 /// `DELETE /api/admin/genres/{id}` — 204, or 404 when there is nothing to drop.
 async fn delete_genre(
-    principal: Principal,
+    _caller: Writer,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Response {
-    if let Some(refusal) = refuse_write(&principal) {
-        return refusal;
-    }
-
-    match services::delete_genre(&state, id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => StatusCode::NOT_FOUND.into_response(),
-        Err(error) => error.into_response(),
+) -> Result<StatusCode, ApiError> {
+    if services::delete_genre(&state, id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
     }
 }

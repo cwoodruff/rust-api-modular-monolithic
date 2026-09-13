@@ -28,6 +28,7 @@
 
 use std::any::Any;
 use std::collections::HashSet;
+use std::convert::Infallible;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,6 +43,18 @@ use super::options::{CacheEntryOptions, CacheOptions};
 
 /// Maps a tag to the set of cache keys carrying it.
 type TagIndex = Arc<DashMap<String, HashSet<String>>>;
+
+/// Why an entry was not stored.
+///
+/// The cache's own value type has no room for "nothing to cache", so both
+/// reasons travel as its error. Neither is stored, and both reach every caller
+/// that coalesced onto the same factory call.
+enum NotStored<E> {
+    /// The factory found nothing. The caller sees `Ok(None)`.
+    Missing,
+    /// The factory failed. Every coalesced caller sees this error.
+    Failed(E),
+}
 
 /// A cached value plus the metadata needed to expire and invalidate it.
 ///
@@ -160,32 +173,14 @@ impl CacheFacade {
         F: FnOnce() -> Fut + Send,
         Fut: Future<Output = Option<T>> + Send,
     {
-        if !self.options.enabled {
-            return factory().await;
-        }
-
-        let effective = self.effective(options);
-        let cache_key = key.to_string();
-        let index_key = cache_key.clone();
-        let index = Arc::clone(&self.tags);
-
-        let entry = self
-            .entries
-            .optionally_get_with(cache_key, async move {
-                let value = factory().await?;
-
-                register_tags(&index, &index_key, &effective.tags);
-
-                Some(CachedEntry {
-                    value: Arc::new(value),
-                    absolute: effective.absolute,
-                    sliding: effective.sliding,
-                    tags: effective.tags,
-                })
-            })
+        let outcome = self
+            .try_get_or_add::<T, Infallible, _, _>(key, || async { Ok(factory().await) }, options)
             .await;
 
-        entry.and_then(|cached| cached.value.downcast_ref::<T>().cloned())
+        match outcome {
+            Ok(value) => value,
+            Err(never) => match never {},
+        }
     }
 
     /// Reads through the cache with a factory that can fail.
@@ -195,6 +190,18 @@ impl CacheFacade {
     /// returns an `Option`, so a failure would be indistinguishable from "not
     /// found" and a database outage would quietly read as an empty collection.
     /// This keeps the failure, and still coalesces concurrent callers.
+    ///
+    /// # Why the outcome travels as the cache's *error*
+    ///
+    /// Both "the factory failed" and "the factory found nothing" are errors as
+    /// far as the cache is concerned, because both mean *do not store this*.
+    /// Routing them through `try_get_with` rather than around it is what makes
+    /// the failure reach every coalesced caller: the cache hands each of them
+    /// the same outcome. The earlier version parked the error in a local
+    /// `Mutex` beside the call, so only the caller that actually ran the
+    /// factory saw it — the others were told the lookup found nothing, and a
+    /// database outage read as a 404 or an empty array for everyone but one
+    /// unlucky request.
     ///
     /// # Errors
     ///
@@ -207,35 +214,45 @@ impl CacheFacade {
     ) -> Result<Option<T>, E>
     where
         T: Clone + Send + Sync + 'static,
-        E: Send + 'static,
+        E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut + Send,
         Fut: Future<Output = Result<Option<T>, E>> + Send,
     {
-        // The factory's error cannot travel through the cache's own return
-        // type, so it is set aside and picked up after.
-        let failure: std::sync::Mutex<Option<E>> = std::sync::Mutex::new(None);
+        if !self.options.enabled {
+            return factory().await;
+        }
 
-        let value = self
-            .get_or_add(
-                key,
-                || async {
-                    match factory().await {
-                        Ok(found) => found,
-                        Err(error) => {
-                            if let Ok(mut slot) = failure.lock() {
-                                *slot = Some(error);
-                            }
-                            None
-                        }
+        let effective = self.effective(options);
+        let cache_key = key.to_string();
+        let index_key = cache_key.clone();
+        let index = Arc::clone(&self.tags);
+
+        let outcome = self
+            .entries
+            .try_get_with(cache_key, async move {
+                match factory().await {
+                    Ok(Some(value)) => {
+                        register_tags(&index, &index_key, &effective.tags);
+
+                        Ok(CachedEntry {
+                            value: Arc::new(value),
+                            absolute: effective.absolute,
+                            sliding: effective.sliding,
+                            tags: effective.tags,
+                        })
                     }
-                },
-                options,
-            )
+                    Ok(None) => Err(NotStored::Missing),
+                    Err(error) => Err(NotStored::Failed(error)),
+                }
+            })
             .await;
 
-        match failure.into_inner() {
-            Ok(Some(error)) => Err(error),
-            _ => Ok(value),
+        match outcome {
+            Ok(entry) => Ok(entry.value.downcast_ref::<T>().cloned()),
+            Err(shared) => match shared.as_ref() {
+                NotStored::Missing => Ok(None),
+                NotStored::Failed(error) => Err(error.clone()),
+            },
         }
     }
 
@@ -598,6 +615,164 @@ mod tests {
             .await;
 
         assert_eq!(loaded, Some(stored));
+    }
+
+    /// The failure a repository would hand back.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Unavailable(&'static str);
+
+    #[tokio::test]
+    async fn a_factory_failure_reaches_the_caller_and_is_not_cached() {
+        let cache = facade();
+        let calls = AtomicUsize::new(0);
+        let key = key("by-id:1");
+
+        for _ in 0..2 {
+            let outcome: Result<Option<String>, Unavailable> = cache
+                .try_get_or_add(
+                    &key,
+                    || async {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Err(Unavailable("no such table: Album"))
+                    },
+                    Some(album_options()),
+                )
+                .await;
+
+            assert_eq!(outcome, Err(Unavailable("no such table: Album")));
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a failure must not be cached, or an outage would outlive itself"
+        );
+    }
+
+    /// The headline fix in this method.
+    ///
+    /// Six callers coalesce onto one factory call and it fails. Every one of
+    /// them has to be told it failed. The earlier version parked the error in a
+    /// `Mutex` beside the call, so the five that did not run the factory were
+    /// told the lookup found nothing — which the services turn into a 404 or an
+    /// empty array. A database outage would have read as *missing data* for
+    /// every request but one.
+    #[tokio::test]
+    async fn every_coalesced_caller_is_told_the_factory_failed() {
+        let cache = facade();
+        let calls = AtomicUsize::new(0);
+        let key = key("all");
+
+        let read = || async {
+            cache
+                .try_get_or_add::<Vec<String>, Unavailable, _, _>(
+                    &key,
+                    || async {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        Err(Unavailable("database is locked"))
+                    },
+                    Some(album_options()),
+                )
+                .await
+        };
+
+        let results = tokio::join!(read(), read(), read(), read(), read(), read());
+        let results = [
+            results.0, results.1, results.2, results.3, results.4, results.5,
+        ];
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the whole point is that they coalesced"
+        );
+        for (position, result) in results.into_iter().enumerate() {
+            assert_eq!(
+                result,
+                Err(Unavailable("database is locked")),
+                "caller {position} was not told about the failure"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failure_for_one_caller_does_not_poison_the_next_read() {
+        // The failure is shared with everyone waiting on it, and then forgotten:
+        // the read after the outage must see real data.
+        let cache = facade();
+        let failing = AtomicUsize::new(0);
+        let key = key("by-id:1");
+
+        let outcome: Result<Option<String>, Unavailable> = cache
+            .try_get_or_add(
+                &key,
+                || async {
+                    failing.fetch_add(1, Ordering::SeqCst);
+                    Err(Unavailable("database is locked"))
+                },
+                Some(album_options()),
+            )
+            .await;
+        assert!(outcome.is_err());
+
+        let recovered: Result<Option<String>, Unavailable> = cache
+            .try_get_or_add(
+                &key,
+                || async { Ok(Some("Let It Be".to_owned())) },
+                Some(album_options()),
+            )
+            .await;
+
+        assert_eq!(recovered, Ok(Some("Let It Be".to_owned())));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_cache_still_reports_the_factorys_failure() {
+        let cache = CacheFacade::new(CacheOptions {
+            enabled: false,
+            ..CacheOptions::default()
+        });
+
+        let outcome: Result<Option<String>, Unavailable> = cache
+            .try_get_or_add(
+                &key("by-id:1"),
+                || async { Err(Unavailable("no such table: Album")) },
+                Some(album_options()),
+            )
+            .await;
+
+        assert_eq!(outcome, Err(Unavailable("no such table: Album")));
+    }
+
+    #[tokio::test]
+    async fn concurrent_misses_that_find_nothing_all_report_nothing() {
+        // "Found nothing" travels the same path as a failure now, so it is
+        // worth pinning that it still reads as `Ok(None)` for everyone.
+        let cache = facade();
+        let calls = AtomicUsize::new(0);
+        let key = key("by-id:999");
+
+        let read = || async {
+            cache
+                .try_get_or_add::<String, Unavailable, _, _>(
+                    &key,
+                    || async {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        Ok(None)
+                    },
+                    Some(album_options()),
+                )
+                .await
+        };
+
+        let results = tokio::join!(read(), read(), read());
+
+        assert_eq!(results.0, Ok(None));
+        assert_eq!(results.1, Ok(None));
+        assert_eq!(results.2, Ok(None));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

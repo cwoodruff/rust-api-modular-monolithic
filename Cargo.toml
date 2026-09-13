@@ -56,6 +56,8 @@ rust_decimal = { version = "1", features = ["serde", "serde-float"] }
 jsonwebtoken = "9"
 rsa = { version = "0.9", features = ["sha2"] }
 base64 = "0.22"
+# Only for the RFC 7638 JWK thumbprint the PEM provider derives its `kid` from.
+sha2 = "0.10"
 # Held at 0.8 to match the rand_core version `rsa` 0.9 expects; the dev key
 # provider generates RSA-2048 through both.
 rand = "0.8"
