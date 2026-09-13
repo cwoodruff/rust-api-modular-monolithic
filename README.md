@@ -100,11 +100,26 @@ in-memory login store and the development signing key, and an image that
 quietly enables all three is the wrong default. Left unset the host runs as
 Production and exits at startup naming what to configure — which is the
 original's behavior too, minus the mystery. A production container needs a real
-key provider:
+key provider — an RSA private key you supply, either as a file the platform
+mounts or as a variable it injects:
 
 ```sh
--e Jwt__KeyProvider=KeyVault -e Jwt__KeyVaultVaultUri=... -e Jwt__KeyVaultKeyName=...
+# a mounted file
+-e Jwt__KeyProvider=File -e Jwt__PemKeyPath=/run/secrets/jwt-signing-key.pem
+
+# or straight from the environment
+-e Jwt__KeyProvider=Environment -e JWT_SIGNING_KEY_PEM="$(cat jwt-signing-key.pem)"
 ```
+
+Either PEM encoding works — `openssl genrsa -out jwt-signing-key.pem 2048` and
+`openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048` both produce a
+key this accepts. The `kid` the JWKS document publishes is derived from the key
+itself (RFC 7638), so it is the same across restarts and across replicas; set
+`Jwt__KeyId` only if an existing deployment already publishes a particular one.
+
+`Jwt__KeyProvider=KeyVault` is recognized and refused: the original's Key Vault
+provider is not implemented in this port, and the error says so rather than
+failing later at the first signature.
 
 ## Layout
 

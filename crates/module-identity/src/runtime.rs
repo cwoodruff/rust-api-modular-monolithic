@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use shared_kernel::{AppConfig, Environment};
 
-use crate::keys::{DevKeyMaterial, KeyError, KeyMaterial};
+use crate::keys::{DevKeyMaterial, KeyError, KeyMaterial, PemKeyMaterial};
 use crate::options::{IDENTITY_SECTION, IdentityOptions, JWT_SECTION, JwtAuthOptions};
 use crate::stores::{DisabledUserStore, InMemoryRefreshTokenStore, InMemoryUserStore, UserStore};
 use crate::tokens::TokenService;
@@ -30,8 +30,11 @@ impl IdentityRuntime {
     /// # Key provider
     ///
     /// `Dev` is refused outside Development and Demo, exactly as the original
-    /// refuses it — a production host must name a Key Vault. `KeyVault` itself
-    /// is not implemented here; the trait is in place for it.
+    /// refuses it. `File` and `Environment` read an RSA private key supplied as
+    /// a PEM and run anywhere, which is what lets a Production host start at
+    /// all: `KeyVault`, the original's only other option, is not implemented
+    /// here, so before those two a Production host had no usable provider and
+    /// refused to boot.
     ///
     /// # User store
     ///
@@ -100,10 +103,44 @@ fn build_keys(
     environment: &Environment,
     content_root: &Path,
 ) -> Result<Arc<dyn KeyMaterial>, KeyError> {
+    let key_id = options.key_id.clone();
+
     match options.key_provider.trim() {
-        "KeyVault" => Err(KeyError::Unavailable(
-            "the KeyVault key provider is not implemented in this port yet; \
-             the trait is in place for it"
+        provider
+            if provider.eq_ignore_ascii_case("File") || provider.eq_ignore_ascii_case("Pem") =>
+        {
+            let configured = options
+                .pem_key_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| {
+                    KeyError::Misconfigured(
+                        "Jwt:KeyProvider is File but Jwt:PemKeyPath is not set".to_owned(),
+                    )
+                })?;
+
+            // An absolute path is honored as written; a relative one resolves
+            // against the content root, as every other configured path does.
+            let path = content_root.join(configured);
+
+            Ok(Arc::new(PemKeyMaterial::from_file(&path, key_id)?))
+        }
+
+        provider
+            if provider.eq_ignore_ascii_case("Environment")
+                || provider.eq_ignore_ascii_case("Env") =>
+        {
+            Ok(Arc::new(PemKeyMaterial::from_environment(
+                &options.pem_key_environment_variable,
+                key_id,
+            )?))
+        }
+
+        provider if provider.eq_ignore_ascii_case("KeyVault") => Err(KeyError::Unavailable(
+            "the KeyVault key provider is not implemented in this port; \
+             use Jwt:KeyProvider=File with Jwt:PemKeyPath, or Environment with \
+             Jwt:PemKeyEnvironmentVariable, and have the platform deliver the key"
                 .to_owned(),
         )),
 
@@ -111,7 +148,8 @@ fn build_keys(
             if !environment.exposes_operational_metadata() {
                 return Err(KeyError::Unavailable(format!(
                     "the development key provider cannot run in {}; \
-                     set Jwt:KeyProvider=KeyVault with a vault URI and key name",
+                     set Jwt:KeyProvider=File with Jwt:PemKeyPath, or Environment with \
+                     Jwt:PemKeyEnvironmentVariable",
                     environment.name()
                 )));
             }
@@ -122,8 +160,9 @@ fn build_keys(
             Ok(Arc::new(DevKeyMaterial::load_or_create(&path)?))
         }
 
-        other => Err(KeyError::Unavailable(format!(
-            "unsupported Jwt:KeyProvider value '{other}'"
+        other => Err(KeyError::Misconfigured(format!(
+            "unsupported Jwt:KeyProvider value '{other}'; \
+             expected Dev, File, Environment, or KeyVault"
         ))),
     }
 }
@@ -157,6 +196,25 @@ mod tests {
         )
     }
 
+    /// A PKCS#8 PEM written to a scratch file, plus its directory.
+    fn scratch_key(label: &str) -> std::path::PathBuf {
+        use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+
+        let private = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), crate::keys::KEY_SIZE_BITS)
+            .expect("a key should generate");
+        let pem = private
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("the key should encode");
+
+        let path = std::env::temp_dir().join(format!(
+            "runtime-signing-key-{}-{label}.pem",
+            std::process::id()
+        ));
+        std::fs::write(&path, pem.as_bytes()).expect("the key should write");
+
+        path
+    }
+
     #[test]
     fn the_development_provider_is_refused_in_production() {
         // The original throws at startup rather than signing with a
@@ -167,9 +225,82 @@ mod tests {
             .expect_err("a production host must not use the dev key provider");
 
         assert!(
-            error.to_string().contains("KeyVault"),
-            "the message should say what to do instead: {error}"
+            error.to_string().contains("Jwt:PemKeyPath"),
+            "the message should name a provider that actually works: {error}"
         );
+    }
+
+    #[test]
+    fn a_production_host_starts_on_a_pem_key_from_a_file() {
+        // The point of the provider. Before it, Production had no usable key
+        // provider at all: `Dev` is refused there and `KeyVault` is not built.
+        let path = scratch_key("file");
+        let config = config_for(
+            Environment::Production,
+            serde_json::json!({
+                "jwt": { "keyprovider": "File", "pemkeypath": path.to_string_lossy() }
+            }),
+        );
+
+        let runtime = IdentityRuntime::from_config(config_ref(&config), Path::new("."))
+            .expect("a production host should start on a supplied key");
+
+        assert!(
+            !runtime.tokens().jwks()["keys"][0]["kid"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "the published JWKS should name the key"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_file_provider_says_what_is_missing_rather_than_failing_obscurely() {
+        let config = config_for(
+            Environment::Production,
+            serde_json::json!({ "jwt": { "keyprovider": "File" } }),
+        );
+
+        let error = IdentityRuntime::from_config(config_ref(&config), Path::new("."))
+            .expect_err("File with no path should fail");
+
+        assert!(error.to_string().contains("Jwt:PemKeyPath"), "{error}");
+    }
+
+    #[test]
+    fn the_environment_provider_says_which_variable_it_wanted() {
+        let config = config_for(
+            Environment::Production,
+            serde_json::json!({
+                "jwt": {
+                    "keyprovider": "Environment",
+                    "pemkeyenvironmentvariable": "A_VARIABLE_THAT_IS_NOT_SET"
+                }
+            }),
+        );
+
+        let error = IdentityRuntime::from_config(config_ref(&config), Path::new("."))
+            .expect_err("an unset variable should fail");
+
+        assert!(
+            error.to_string().contains("A_VARIABLE_THAT_IS_NOT_SET"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_key_vault_provider_points_at_the_two_that_are_built() {
+        let config = config_for(
+            Environment::Production,
+            serde_json::json!({ "jwt": { "keyprovider": "KeyVault" } }),
+        );
+
+        let error = IdentityRuntime::from_config(config_ref(&config), Path::new("."))
+            .expect_err("KeyVault is still not implemented");
+
+        assert!(error.to_string().contains("Jwt:PemKeyPath"), "{error}");
     }
 
     #[test]
@@ -183,6 +314,10 @@ mod tests {
             .expect_err("an unknown provider should fail");
 
         assert!(error.to_string().contains("Nonsense"), "{error}");
+        assert!(
+            error.to_string().contains("File"),
+            "the message should list the providers that exist: {error}"
+        );
     }
 
     #[test]

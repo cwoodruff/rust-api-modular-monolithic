@@ -23,19 +23,48 @@ pub struct JwtAuthOptions {
     /// Refresh-token lifetime, in days.
     #[serde(rename = "refreshtokendays", alias = "refresh_token_days")]
     pub refresh_token_days: i64,
-    /// `Dev` or `KeyVault`.
+    /// Which key provider to use: `Dev`, `File`, `Environment`, or `KeyVault`.
     #[serde(rename = "keyprovider", alias = "key_provider")]
     pub key_provider: String,
     /// Where the development provider persists its key.
     #[serde(rename = "developmentkeypath", alias = "development_key_path")]
     pub development_key_path: String,
+    /// Where the `File` provider reads its PEM from, relative to the content root.
+    #[serde(rename = "pemkeypath", alias = "pem_key_path")]
+    pub pem_key_path: Option<String>,
+    /// Which environment variable the `Environment` provider reads its PEM from.
+    #[serde(
+        rename = "pemkeyenvironmentvariable",
+        alias = "pem_key_environment_variable"
+    )]
+    pub pem_key_environment_variable: String,
+    /// The `kid` to publish, when the key itself should not decide.
+    ///
+    /// Left unset the PEM providers derive one from the key (RFC 7638), which
+    /// is stable across restarts and replicas. Set it only when an existing
+    /// deployment already publishes a particular value.
+    #[serde(rename = "keyid", alias = "key_id")]
+    pub key_id: Option<String>,
     /// Key Vault URI, when the provider is `KeyVault`.
-    #[serde(rename = "keyvaultvauturi", alias = "key_vault_vault_uri")]
+    ///
+    /// The C# record spells this member `KeyVaultVautUri` — "Vaut". The typo is
+    /// in the original's own configuration binding, so a deployment that has
+    /// been setting `Jwt:KeyVaultVautUri` is setting the key that actually
+    /// works there. The canonical spelling here is the correct one, with the
+    /// original's kept as an alias so such a deployment keeps binding.
+    #[serde(
+        rename = "keyvaultvaulturi",
+        alias = "keyvaultvauturi",
+        alias = "key_vault_vault_uri"
+    )]
     pub key_vault_vault_uri: Option<String>,
     /// Key Vault key name, when the provider is `KeyVault`.
     #[serde(rename = "keyvaultkeyname", alias = "key_vault_key_name")]
     pub key_vault_key_name: Option<String>,
 }
+
+/// The variable the `Environment` key provider reads unless told otherwise.
+pub const DEFAULT_PEM_ENVIRONMENT_VARIABLE: &str = "JWT_SIGNING_KEY_PEM";
 
 impl Default for JwtAuthOptions {
     fn default() -> Self {
@@ -46,6 +75,9 @@ impl Default for JwtAuthOptions {
             refresh_token_days: 7,
             key_provider: "Dev".to_owned(),
             development_key_path: "data/identity/dev-jwt-signing-key.json".to_owned(),
+            pem_key_path: None,
+            pem_key_environment_variable: DEFAULT_PEM_ENVIRONMENT_VARIABLE.to_owned(),
+            key_id: None,
             key_vault_vault_uri: None,
             key_vault_key_name: None,
         }
@@ -159,11 +191,50 @@ mod tests {
         assert_eq!(bound.key_provider, "KeyVault");
         assert_eq!(
             bound.key_vault_vault_uri.as_deref(),
-            Some("https://vault.example")
+            Some("https://vault.example"),
+            "the original's misspelled key still binds"
         );
         // Untouched members keep their defaults.
         assert_eq!(bound.audience, "modular-api");
         assert_eq!(bound.refresh_token_days, 7);
+        assert_eq!(
+            bound.pem_key_environment_variable,
+            DEFAULT_PEM_ENVIRONMENT_VARIABLE
+        );
+    }
+
+    #[test]
+    fn the_vault_uri_binds_from_the_correct_spelling_as_well_as_the_originals() {
+        // `KeyVaultVautUri` is a typo in the C# record, and a deployment may
+        // already be setting it, so both spellings have to work.
+        for key in ["keyvaultvaulturi", "keyvaultvauturi"] {
+            let bound: JwtAuthOptions =
+                serde_json::from_value(serde_json::json!({ key: "https://vault.example" }))
+                    .expect("the section should bind");
+
+            assert_eq!(
+                bound.key_vault_vault_uri.as_deref(),
+                Some("https://vault.example"),
+                "`{key}` should have bound"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pem_providers_configuration_binds() {
+        let bound: JwtAuthOptions = serde_json::from_value(serde_json::json!({
+            "keyprovider": "File",
+            "pemkeypath": "/etc/modular-monolith/signing-key.pem",
+            "keyid": "2026-q1"
+        }))
+        .expect("the section should bind");
+
+        assert_eq!(bound.key_provider, "File");
+        assert_eq!(
+            bound.pem_key_path.as_deref(),
+            Some("/etc/modular-monolith/signing-key.pem")
+        );
+        assert_eq!(bound.key_id.as_deref(), Some("2026-q1"));
     }
 
     #[test]
