@@ -28,8 +28,11 @@ use axum::http::{HeaderName, HeaderValue, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
-use shared_kernel::errors::{ProblemDetails, new_trace_id, status_code_page};
+use shared_kernel::errors::{
+    ProblemDetails, current_trace_id, is_traceparent, new_trace_id, status_code_page, with_trace_id,
+};
 use shared_kernel::traffic_control::{self, PUBLIC_ANON_PERMIT_LIMIT, PUBLIC_ANON_WINDOW};
+use tracing::Instrument;
 
 /// The six headers the original sets on every response, labelled "OWASP A05".
 ///
@@ -63,6 +66,60 @@ pub const ALLOWED_ORIGINS: [&str; 6] = [
     "https://localhost:4200",
     "https://localhost:5173",
 ];
+
+/// The header the request's trace identifier is echoed on.
+///
+/// The original sets no such header: its `traceId` appears only in the body of
+/// a problem document, so a 200 carries no identifier at all and a client
+/// reporting a slow or wrong response has nothing to quote. This adds one
+/// without changing any body.
+pub const TRACE_ID_HEADER: HeaderName = HeaderName::from_static("x-trace-id");
+
+/// The inbound header a caller can use to continue an existing trace.
+pub const TRACEPARENT_HEADER: HeaderName = HeaderName::from_static("traceparent");
+
+/// Establishes the request's trace identifier.
+///
+/// This is what makes the `traceId` in a problem document worth anything.
+/// Before it, every response-building path minted its own identifier: the body
+/// of a 500 named one trace, the log record written while handling it named
+/// none, and nothing tied the two together — so the one field whose entire
+/// purpose is correlation correlated with nothing.
+///
+/// One identifier is now established per request and used three ways: it is
+/// the ambient value [`current_trace_id`] returns, so every problem document
+/// raised anywhere inside reports it; it is a field on the `tracing` span that
+/// wraps the request, so every log record emitted while handling it carries it;
+/// and it goes out on [`TRACE_ID_HEADER`], so a caller can quote it.
+///
+/// A caller's own `traceparent` is honored when it really is one, so a trace
+/// that started upstream continues rather than restarting here.
+pub async fn request_id(request: Request, next: Next) -> Response {
+    let inbound = request
+        .headers()
+        .get(&TRACEPARENT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| is_traceparent(value))
+        .map(ToOwned::to_owned);
+
+    let trace_id = inbound.unwrap_or_else(new_trace_id);
+
+    let span = tracing::info_span!(
+        "request",
+        trace_id = %trace_id,
+        method = %request.method(),
+        path = %request.uri().path(),
+    );
+
+    let mut response = with_trace_id(trace_id.clone(), next.run(request).instrument(span)).await;
+
+    if let Ok(value) = HeaderValue::from_str(&trace_id) {
+        response.headers_mut().insert(TRACE_ID_HEADER, value);
+    }
+
+    response
+}
 
 /// Sets the security headers on every response.
 pub async fn security_headers(request: Request, next: Next) -> Response {
@@ -266,14 +323,18 @@ pub fn panic_to_problem(panic: Box<dyn std::any::Any + Send + 'static>) -> Respo
     ProblemDetails::internal_server_error(trace_id()).into_response()
 }
 
-/// A correlation identifier for one response.
+/// The identifier this response should report.
+///
+/// Inside a request this is the one [`request_id`] established, so the document
+/// a layer writes names the same trace the log records do. Outside one — in a
+/// test that calls a layer directly — it falls back to a fresh identifier.
 ///
 /// Verified against the running service: every `traceId` on the wire is a W3C
 /// `traceparent`, because `HttpContext.TraceIdentifier` reports the ambient
 /// activity rather than Kestrel's connection counter.
 #[must_use]
 pub fn trace_id() -> String {
-    new_trace_id()
+    current_trace_id()
 }
 
 /// Whether a request arrived over a secure transport.

@@ -9,7 +9,7 @@ use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{Algorithm, Header, Validation};
 use rand::RngCore;
-use shared_kernel::AuthenticatedUser;
+use shared_kernel::{AuthenticatedUser, REDACTED};
 
 use crate::claims::{AccessTokenClaims, ClaimValues};
 use crate::keys::KeyMaterial;
@@ -20,7 +20,10 @@ use crate::stores::{InMemoryRefreshTokenStore, UserRecord, UserStore};
 pub const REFRESH_TOKEN_BYTES: usize = 64;
 
 /// An issued access and refresh token pair.
-#[derive(Debug, Clone)]
+///
+/// Both members are bearer credentials, so `Debug` reports only when the access
+/// token expires.
+#[derive(Clone)]
 pub struct TokenPair {
     /// The signed JWT.
     pub access_token: String,
@@ -28,6 +31,17 @@ pub struct TokenPair {
     pub refresh_token: String,
     /// When the access token expires.
     pub expires_at_utc: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for TokenPair {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokenPair")
+            .field("access_token", &REDACTED)
+            .field("refresh_token", &REDACTED)
+            .field("expires_at_utc", &self.expires_at_utc)
+            .finish()
+    }
 }
 
 /// Issues and refreshes tokens.
@@ -369,6 +383,18 @@ mod tests {
         // 64 bytes, base64 with padding.
         assert_eq!(first.len(), 88);
         assert_eq!(STANDARD.decode(&first).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn an_issued_pair_does_not_print_either_of_its_credentials() {
+        let service = service();
+        let pair = service.issue(&user()).unwrap();
+
+        let rendered = format!("{pair:?}");
+
+        assert!(!rendered.contains(&pair.access_token), "{rendered}");
+        assert!(!rendered.contains(&pair.refresh_token), "{rendered}");
+        assert!(rendered.contains(REDACTED), "{rendered}");
     }
 
     #[test]

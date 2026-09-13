@@ -18,6 +18,7 @@ use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
+use shared_kernel::REDACTED;
 
 /// Modulus size the original generates.
 pub const KEY_SIZE_BITS: usize = 2048;
@@ -25,12 +26,25 @@ pub const KEY_SIZE_BITS: usize = 2048;
 /// The persisted form of a development key.
 ///
 /// Member names are PascalCase because that is what the C# provider writes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// No derived `Debug`: the second member is the signing key itself, and a
+/// process that logged one could have every token it ever issued forged.
+#[derive(Clone, Serialize, Deserialize)]
 struct PersistedKey {
     #[serde(rename = "Kid")]
     kid: String,
     #[serde(rename = "PrivateKeyPkcs8Base64")]
     private_key_pkcs8_base64: String,
+}
+
+impl std::fmt::Debug for PersistedKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PersistedKey")
+            .field("kid", &self.kid)
+            .field("private_key_pkcs8_base64", &REDACTED)
+            .finish()
+    }
 }
 
 /// Something went wrong producing or loading key material.

@@ -19,6 +19,7 @@ pub mod errors;
 pub mod health;
 pub mod json;
 pub mod module;
+pub mod redaction;
 pub mod traffic_control;
 
 pub use auth::{
@@ -31,3 +32,4 @@ pub use errors::{ApiError, ProblemDetails};
 pub use health::{DatabaseProbe, HealthContext, HealthResponse};
 pub use json::JsonBody;
 pub use module::Module;
+pub use redaction::REDACTED;

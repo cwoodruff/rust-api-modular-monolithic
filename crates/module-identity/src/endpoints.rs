@@ -10,13 +10,17 @@ use serde::{Deserialize, Serialize};
 use shared_kernel::auth::unauthorized;
 use shared_kernel::errors::{current_trace_id, default_problem_type};
 use shared_kernel::guards::Authenticated;
-use shared_kernel::{ApiError, Authorized, ProblemDetails};
+use shared_kernel::{ApiError, Authorized, ProblemDetails, REDACTED};
 
 use crate::runtime::IdentityRuntime;
 use crate::tokens::TokenPair;
 
 /// The login request body. Member names are lowercase, as the record declares.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// A rejected login is logged, and the natural thing to log is the request.
+/// `Debug` therefore keeps the username, which is what makes the record useful,
+/// and drops the password, which is what makes it dangerous.
+#[derive(Clone, Deserialize)]
 pub struct LoginRequest {
     /// The login name.
     #[serde(default)]
@@ -26,8 +30,18 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+impl std::fmt::Debug for LoginRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LoginRequest")
+            .field("username", &self.username)
+            .field("password", &REDACTED)
+            .finish()
+    }
+}
+
 /// The refresh request body.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct RefreshRequest {
     /// The user whose token is being exchanged.
     #[serde(default, rename = "userId")]
@@ -37,8 +51,18 @@ pub struct RefreshRequest {
     pub refresh_token: String,
 }
 
+impl std::fmt::Debug for RefreshRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RefreshRequest")
+            .field("user_id", &self.user_id)
+            .field("refresh_token", &REDACTED)
+            .finish()
+    }
+}
+
 /// The logout request body.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct LogoutRequest {
     /// The user whose token is being revoked.
     #[serde(default, rename = "userId")]
@@ -48,11 +72,21 @@ pub struct LogoutRequest {
     pub refresh_token: String,
 }
 
+impl std::fmt::Debug for LogoutRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LogoutRequest")
+            .field("user_id", &self.user_id)
+            .field("refresh_token", &REDACTED)
+            .finish()
+    }
+}
+
 /// The token envelope.
 ///
 /// Snake-case members, unlike the PascalCase API models — these come from a C#
 /// anonymous object and the host's naming policy leaves both alone.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct TokenResponse {
     /// The signed JWT.
     pub access_token: String,
@@ -66,6 +100,18 @@ pub struct TokenResponse {
     pub expires_at_utc: String,
     /// The opaque refresh token.
     pub refresh_token: String,
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokenResponse")
+            .field("access_token", &REDACTED)
+            .field("token_type", &self.token_type)
+            .field("expires_at_utc", &self.expires_at_utc)
+            .field("refresh_token", &REDACTED)
+            .finish()
+    }
 }
 
 impl TokenResponse {
@@ -306,6 +352,52 @@ mod tests {
                 "refresh_token": "opaque"
             })
         );
+    }
+
+    #[test]
+    fn a_failed_login_can_be_logged_without_logging_the_password() {
+        // The handler warns on a rejected login, and `?request` is the obvious
+        // thing to put in that record.
+        let request = LoginRequest {
+            username: "demo".to_owned(),
+            password: "hunter2".to_owned(),
+        };
+
+        let rendered = format!("{request:?}");
+
+        assert!(rendered.contains("demo"), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+    }
+
+    #[test]
+    fn neither_token_body_prints_the_token_it_carries() {
+        let refresh = RefreshRequest {
+            user_id: "user-1".to_owned(),
+            refresh_token: "an-opaque-credential".to_owned(),
+        };
+        let logout = LogoutRequest {
+            user_id: "user-1".to_owned(),
+            refresh_token: "an-opaque-credential".to_owned(),
+        };
+        let response = TokenResponse {
+            access_token: "header.payload.signature".to_owned(),
+            token_type: "Bearer".to_owned(),
+            expires_at_utc: "2026-09-11T23:09:46.900751+00:00".to_owned(),
+            refresh_token: "an-opaque-credential".to_owned(),
+        };
+
+        for rendered in [
+            format!("{refresh:?}"),
+            format!("{logout:?}"),
+            format!("{response:?}"),
+        ] {
+            assert!(!rendered.contains("an-opaque-credential"), "{rendered}");
+            assert!(!rendered.contains("header.payload.signature"), "{rendered}");
+            assert!(
+                rendered.contains("user-1") || rendered.contains("Bearer"),
+                "{rendered}"
+            );
+        }
     }
 
     #[test]

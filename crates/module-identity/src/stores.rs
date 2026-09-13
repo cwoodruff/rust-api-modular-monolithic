@@ -9,10 +9,16 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 
+use shared_kernel::REDACTED;
+
 use crate::options::InMemoryUserRecord;
 
 /// A login the store can authenticate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is written out rather than derived: the password is held in plain
+/// text, as the original holds it, and a derived `Debug` would print it on the
+/// first `tracing` call that wrote `?user`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct UserRecord {
     /// The login name.
     pub username: String,
@@ -32,6 +38,22 @@ pub struct UserRecord {
     pub tenant: Option<String>,
 }
 
+impl std::fmt::Debug for UserRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UserRecord")
+            .field("username", &self.username)
+            .field("password", &REDACTED)
+            .field("user_id", &self.user_id)
+            .field("display_name", &self.display_name)
+            .field("roles", &self.roles)
+            .field("permissions", &self.permissions)
+            .field("email", &self.email)
+            .field("tenant", &self.tenant)
+            .finish()
+    }
+}
+
 /// Where logins come from.
 pub trait UserStore: Send + Sync {
     /// Checks a username and password.
@@ -42,10 +64,23 @@ pub trait UserStore: Send + Sync {
 }
 
 /// The development store, ported from `InMemoryUserStore`.
-#[derive(Debug, Default)]
+///
+/// `Debug` reports how many logins it holds, not which. Its values are
+/// [`UserRecord`]s, and printing the map would defeat their own redaction by
+/// also printing the usernames it is keyed by.
+#[derive(Default)]
 pub struct InMemoryUserStore {
     /// Keyed by lowercase username, since lookup is case-insensitive.
     users: HashMap<String, UserRecord>,
+}
+
+impl std::fmt::Debug for InMemoryUserStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InMemoryUserStore")
+            .field("logins", &self.users.len())
+            .finish()
+    }
 }
 
 impl InMemoryUserStore {
@@ -162,9 +197,21 @@ impl UserStore for DisabledUserStore {
 /// The refresh-token store, ported from `InMemoryRefreshTokenStore`.
 ///
 /// Keyed by `"{userId}:{token}"`, exactly as the original keys it.
-#[derive(Debug, Default)]
+///
+/// That key is why `Debug` is written out: it *contains* the refresh token, so
+/// printing the map would print every live credential in the process.
+#[derive(Default)]
 pub struct InMemoryRefreshTokenStore {
     tokens: DashMap<String, DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for InMemoryRefreshTokenStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InMemoryRefreshTokenStore")
+            .field("tokens", &self.tokens.len())
+            .finish()
+    }
 }
 
 impl InMemoryRefreshTokenStore {
@@ -276,6 +323,38 @@ mod tests {
             "defaults to the trimmed username"
         );
         assert_eq!(user.user_id, "user-1");
+    }
+
+    #[test]
+    fn no_debug_rendering_here_can_disclose_a_credential() {
+        // `?user` and `?store` both reach these, and a derived Debug would put
+        // the password and every live refresh token in the log.
+        let store = InMemoryUserStore::from_records(&records());
+        let user = store.validate_credentials("demo", "secret").unwrap();
+
+        let rendered = format!("{user:?}");
+        assert!(rendered.contains("username: \"Demo\""), "{rendered}");
+        assert!(!rendered.contains("secret"), "{rendered}");
+        assert!(rendered.contains(REDACTED), "{rendered}");
+
+        assert!(!format!("{store:?}").contains("secret"));
+
+        let tokens = InMemoryRefreshTokenStore::new();
+        tokens.store(
+            "user-1",
+            "a-real-refresh-token",
+            Utc::now() + Duration::days(7),
+        );
+
+        let rendered = format!("{tokens:?}");
+        assert!(
+            !rendered.contains("a-real-refresh-token"),
+            "the store is keyed by the token itself: {rendered}"
+        );
+        assert!(
+            rendered.contains('1'),
+            "the count is still useful: {rendered}"
+        );
     }
 
     #[test]

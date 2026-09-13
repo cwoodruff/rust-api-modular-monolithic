@@ -1,6 +1,7 @@
 //! Configuration, ported from `JwtAuthOptions` and `InMemoryUserStoreOptions`.
 
 use serde::Deserialize;
+use shared_kernel::REDACTED;
 
 /// The configuration section the JWT options bind from.
 pub const JWT_SECTION: &str = "Jwt";
@@ -70,7 +71,10 @@ pub struct IdentityOptions {
 ///
 /// The original ships an **empty** array and documents `dotnet user-secrets`
 /// for filling it, so there are no baked-in credentials to reproduce.
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// `Debug` is written out rather than derived so the password cannot reach a
+/// log through `?record`.
+#[derive(Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct InMemoryUserRecord {
     /// Login name. Matched case-insensitively.
@@ -91,6 +95,22 @@ pub struct InMemoryUserRecord {
     pub email: Option<String>,
     /// Tenant claim.
     pub tenant: Option<String>,
+}
+
+impl std::fmt::Debug for InMemoryUserRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InMemoryUserRecord")
+            .field("username", &self.username)
+            .field("password", &REDACTED)
+            .field("user_id", &self.user_id)
+            .field("display_name", &self.display_name)
+            .field("roles", &self.roles)
+            .field("permissions", &self.permissions)
+            .field("email", &self.email)
+            .field("tenant", &self.tenant)
+            .finish()
+    }
 }
 
 impl InMemoryUserRecord {
@@ -165,6 +185,25 @@ mod tests {
             }
             assert!(!record.is_usable(), "missing {missing} should be rejected");
         }
+    }
+
+    #[test]
+    fn a_configured_login_does_not_print_its_password() {
+        let record = InMemoryUserRecord {
+            username: "demo".to_owned(),
+            password: "hunter2".to_owned(),
+            user_id: "user-1".to_owned(),
+            ..InMemoryUserRecord::default()
+        };
+
+        let rendered = format!("{record:?}");
+
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(
+            rendered.contains("demo"),
+            "the useful half stays: {rendered}"
+        );
+        assert!(rendered.contains(REDACTED), "{rendered}");
     }
 
     #[test]

@@ -80,7 +80,11 @@ pub fn build(state: AppState, identity: Arc<IdentityRuntime>) -> Router {
         // UseExceptionHandler(...) — a panic is the closest thing Rust has to
         // the unhandled exception that handler exists for.
         .layer(CatchPanicLayer::custom(own::panic_to_problem))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        // Outermost, so the identifier it establishes is in scope for every
+        // layer below — including the panic handler and the status-code pages,
+        // which are the two that write a `traceId` a caller actually sees.
+        .layer(middleware::from_fn(own::request_id));
 
     // UseHsts() — non-Development only, as in the original.
     if secure_transport {
@@ -109,7 +113,9 @@ fn cors() -> CorsLayer {
             Method::HEAD,
             Method::OPTIONS,
         ])
-        .expose_headers([header::CONTENT_TYPE])
+        // The trace identifier is only useful if a browser client can read it
+        // back off the response.
+        .expose_headers([header::CONTENT_TYPE, own::TRACE_ID_HEADER])
 }
 
 #[cfg(test)]
