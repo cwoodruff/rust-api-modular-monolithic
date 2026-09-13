@@ -19,6 +19,9 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
+use crate::data::RepositoryError;
+use crate::json::MalformedRequest;
+
 /// The `type` the original uses for client errors (RFC 9110 §15.5.1).
 pub const CLIENT_ERROR_TYPE: &str = "https://www.rfc-editor.org/rfc/rfc9110#section-15.5.1";
 
@@ -272,6 +275,163 @@ fn default_type_for(fragment: &str) -> &'static str {
         "#section-15.5.21" => "https://tools.ietf.org/html/rfc9110#section-15.5.21",
         "#section-15.5.22" => "https://tools.ietf.org/html/rfc9110#section-15.5.22",
         _ => "https://tools.ietf.org/html/rfc9110#section-15.6.1",
+    }
+}
+
+tokio::task_local! {
+    /// The identifier every problem document raised while serving one request
+    /// reports as its `traceId`.
+    static REQUEST_TRACE_ID: String;
+}
+
+/// Runs `work` with `trace_id` as the ambient request identifier.
+///
+/// The host's request-id layer wraps every request in one of these, so any
+/// problem document raised anywhere inside — a handler's 404, a rejected
+/// extractor, the status-code-pages layer, the panic handler — reports the
+/// same `traceId` the response header and the log records carry. Without it
+/// each of those minted its own identifier and none of them agreed.
+pub async fn with_trace_id<F>(trace_id: String, work: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    REQUEST_TRACE_ID.scope(trace_id, work).await
+}
+
+/// The current request's identifier, or a fresh one outside a request.
+///
+/// Every response-building path calls this rather than [`new_trace_id`], so
+/// the only documents carrying an unrelated identifier are the ones built
+/// outside a request — in tests, mostly.
+#[must_use]
+pub fn current_trace_id() -> String {
+    REQUEST_TRACE_ID
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| new_trace_id())
+}
+
+/// Whether a header value is a usable W3C `traceparent`.
+///
+/// An inbound identifier is honored so a `traceId` in a response can be traced
+/// back through whatever proxied the call, but only when it is really one of
+/// these — an arbitrary client-supplied string would otherwise end up in the
+/// logs as though the service had minted it.
+#[must_use]
+pub fn is_traceparent(value: &str) -> bool {
+    let segments: Vec<&str> = value.split('-').collect();
+
+    segments.len() == 4
+        && segments[0].len() == 2
+        && segments[1].len() == 32
+        && segments[2].len() == 16
+        && segments[3].len() == 2
+        && segments
+            .iter()
+            .all(|segment| segment.chars().all(|c| c.is_ascii_hexdigit()))
+        && segments[1].chars().any(|c| c != '0')
+        && segments[2].chars().any(|c| c != '0')
+}
+
+/// Why a request could not be answered.
+///
+/// This is the error half of every handler's `Result`. The C# original has no
+/// equivalent: there, a handler either returns an `IResult` it built itself or
+/// throws, and the host's exception handler sorts out what that becomes. The
+/// shapes below are exactly the ones that handler produces, so the wire output
+/// is unchanged — what changes is that a handler now *returns* its refusal
+/// instead of deciding, statement by statement, to send one.
+#[derive(Debug)]
+pub enum ApiError {
+    /// No usable token: 401 with a `WWW-Authenticate` challenge.
+    Unauthenticated,
+
+    /// Authenticated, but a requirement failed: 403.
+    Forbidden,
+
+    /// Nothing with that key: 404, from the defaults table.
+    NotFound,
+
+    /// A model broke a validation rule: 400 carrying the per-field messages.
+    Validation(BTreeMap<String, Vec<String>>),
+
+    /// The host could not read the request body.
+    Malformed(MalformedRequest),
+
+    /// The database refused: 500, leaking nothing about the cause.
+    Repository(RepositoryError),
+}
+
+impl ApiError {
+    /// The problem document this becomes, under an explicit trace identifier.
+    #[must_use]
+    pub fn into_problem(self, trace_id: impl Into<String>) -> ProblemDetails {
+        let trace_id = trace_id.into();
+
+        match self {
+            Self::Unauthenticated => status_code_page(StatusCode::UNAUTHORIZED, trace_id),
+            Self::Forbidden => status_code_page(StatusCode::FORBIDDEN, trace_id),
+            Self::NotFound => status_code_page(StatusCode::NOT_FOUND, trace_id),
+            Self::Validation(errors) => ProblemDetails::validation(errors, trace_id),
+            Self::Malformed(malformed) => malformed.into_problem_with(trace_id),
+            Self::Repository(error) => error.into_problem(trace_id),
+        }
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unauthenticated => formatter.write_str("unauthenticated"),
+            Self::Forbidden => formatter.write_str("forbidden"),
+            Self::NotFound => formatter.write_str("not found"),
+            Self::Validation(_) => formatter.write_str("request validation failed"),
+            Self::Malformed(_) => formatter.write_str("malformed request"),
+            Self::Repository(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ApiError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Repository(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<RepositoryError> for ApiError {
+    fn from(error: RepositoryError) -> Self {
+        Self::Repository(error)
+    }
+}
+
+impl From<MalformedRequest> for ApiError {
+    fn from(malformed: MalformedRequest) -> Self {
+        Self::Malformed(malformed)
+    }
+}
+
+impl From<std::convert::Infallible> for ApiError {
+    fn from(infallible: std::convert::Infallible) -> Self {
+        match infallible {}
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let challenge = matches!(self, Self::Unauthenticated);
+        let mut response = self.into_problem(current_trace_id()).into_response();
+
+        if challenge {
+            // The JWT challenge writes this; verified on the running service.
+            response.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                header::HeaderValue::from_static("Bearer"),
+            );
+        }
+
+        response
     }
 }
 

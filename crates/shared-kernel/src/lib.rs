@@ -21,11 +21,13 @@ pub mod json;
 pub mod module;
 pub mod traffic_control;
 
-pub use auth::{AuthenticatedUser, AuthorizationFailure, Principal, Requirement};
+pub use auth::{
+    AuthenticatedUser, AuthorizationFailure, Authorized, Policy, Principal, Requirement, guards,
+};
 pub use config::AppConfig;
 pub use data::{RepositoryError, RepositoryResult};
 pub use environment::Environment;
-pub use errors::ProblemDetails;
+pub use errors::{ApiError, ProblemDetails};
 pub use health::{DatabaseProbe, HealthContext, HealthResponse};
 pub use json::JsonBody;
 pub use module::Module;

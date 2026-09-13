@@ -4,10 +4,9 @@
 //! Genre writes are the only ones any endpoint reaches, and they are where
 //! validation and cache invalidation actually run.
 
-use axum::response::{IntoResponse, Response};
-use shared_kernel::ProblemDetails;
 use shared_kernel::caching::CacheEntryOptions;
 use shared_kernel::caching::tags::administration;
+use shared_kernel::errors::{ApiError, validation_errors_from};
 use shared_persistence::AppState;
 use shared_persistence::api_models::{
     CustomerApiModel, EmployeeApiModel, GenreApiModel, MediaTypeApiModel,
@@ -15,7 +14,7 @@ use shared_persistence::api_models::{
 use shared_persistence::convert::{Convert, convert_all};
 use shared_persistence::entities::Genre;
 use shared_persistence::repositories::{RepositoryError, RepositoryResult};
-use shared_persistence::validation::{Validate, ValidationFailure, problem_details};
+use shared_persistence::validation::{Validate, ValidationFailure};
 
 /// The cache module segment these services compose keys under.
 const MODULE: &str = "administration";
@@ -51,26 +50,15 @@ impl From<RepositoryError> for WriteFailure {
     }
 }
 
-impl IntoResponse for WriteFailure {
-    fn into_response(self) -> Response {
-        match self {
-            Self::Validation(failures) => {
-                problem_details(failures, shared_kernel::errors::new_trace_id()).into_response()
-            }
-            Self::Repository(error) => error.into_response(),
-        }
-    }
-}
-
-impl From<WriteFailure> for ProblemDetails {
+impl From<WriteFailure> for ApiError {
     fn from(failure: WriteFailure) -> Self {
         match failure {
-            WriteFailure::Validation(failures) => {
-                problem_details(failures, shared_kernel::errors::new_trace_id())
-            }
-            WriteFailure::Repository(error) => {
-                error.into_problem(shared_kernel::errors::new_trace_id())
-            }
+            WriteFailure::Validation(failures) => Self::Validation(validation_errors_from(
+                failures
+                    .into_iter()
+                    .map(|failure| (failure.property_name, failure.message)),
+            )),
+            WriteFailure::Repository(error) => Self::Repository(error),
         }
     }
 }
@@ -511,7 +499,7 @@ mod tests {
         let failures = GenreApiModel::default()
             .validate()
             .expect_err("should fail");
-        let problem: ProblemDetails = WriteFailure::Validation(failures).into();
+        let problem = ApiError::from(WriteFailure::Validation(failures)).into_problem("trace-1");
 
         let document = serde_json::to_value(&problem).unwrap();
 

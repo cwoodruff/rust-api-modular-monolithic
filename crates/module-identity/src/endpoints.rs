@@ -8,8 +8,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use shared_kernel::auth::unauthorized;
-use shared_kernel::errors::{default_problem_type, new_trace_id};
-use shared_kernel::{AuthorizationFailure, Principal, ProblemDetails, Requirement};
+use shared_kernel::errors::{current_trace_id, default_problem_type};
+use shared_kernel::guards::Authenticated;
+use shared_kernel::{ApiError, Authorized, ProblemDetails};
 
 use crate::runtime::IdentityRuntime;
 use crate::tokens::TokenPair;
@@ -112,7 +113,7 @@ fn invalid_request(detail: &str) -> ProblemDetails {
         detail: Some(detail.to_owned()),
         instance: None,
         errors: None,
-        trace_id: new_trace_id(),
+        trace_id: current_trace_id(),
     }
 }
 
@@ -148,9 +149,9 @@ where
         .route(
             "/logout",
             post(
-                move |principal: Principal, Json(request): Json<LogoutRequest>| {
+                move |caller: Authorized<Authenticated>, Json(request): Json<LogoutRequest>| {
                     let runtime = Arc::clone(&logout);
-                    async move { handle_logout(&runtime, &principal, request) }
+                    async move { handle_logout(&runtime, &caller, request) }
                 },
             ),
         )
@@ -186,7 +187,7 @@ fn handle_login(runtime: &IdentityRuntime, request: LoginRequest) -> Response {
         Ok(pair) => Json(TokenResponse::from_pair(pair)).into_response(),
         Err(error) => {
             tracing::error!(%error, "could not issue a token");
-            ProblemDetails::internal_server_error(new_trace_id()).into_response()
+            ProblemDetails::internal_server_error(current_trace_id()).into_response()
         }
     }
 }
@@ -210,22 +211,17 @@ fn handle_refresh(runtime: &IdentityRuntime, request: RefreshRequest) -> Respons
 
 fn handle_logout(
     runtime: &IdentityRuntime,
-    principal: &Principal,
+    caller: &Authorized<Authenticated>,
     request: LogoutRequest,
-) -> Response {
-    let user = match principal.authorize(&[Requirement::Authenticated]) {
-        Ok(user) => user,
-        Err(failure) => return failure.into_response(),
-    };
-
+) -> Result<StatusCode, ApiError> {
     // A caller may only revoke their own session.
-    if user.subject != request.user_id {
+    if caller.subject != request.user_id {
         tracing::warn!(
-            authenticated = %user.subject,
+            authenticated = %caller.subject,
             requested = %request.user_id,
             "logout ownership mismatch"
         );
-        return AuthorizationFailure::Forbidden.into_response();
+        return Err(ApiError::Forbidden);
     }
 
     runtime
@@ -233,7 +229,7 @@ fn handle_logout(
         .revoke(&request.user_id, &request.refresh_token);
     tracing::info!(user_id = %request.user_id, "user logged out");
 
-    StatusCode::NO_CONTENT.into_response()
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The `userinfo` payload. Lowercase members, from an anonymous object.
@@ -246,18 +242,14 @@ struct UserInfoResponse {
     permissions: Vec<String>,
 }
 
-async fn handle_userinfo(principal: Principal) -> Response {
-    match principal.authorize(&[Requirement::Authenticated]) {
-        Ok(user) => Json(UserInfoResponse {
-            sub: user.subject.clone(),
-            name: user.name.clone(),
-            email: user.email.clone(),
-            roles: user.roles.clone(),
-            permissions: user.permissions.clone(),
-        })
-        .into_response(),
-        Err(failure) => failure.into_response(),
-    }
+async fn handle_userinfo(caller: Authorized<Authenticated>) -> Json<UserInfoResponse> {
+    Json(UserInfoResponse {
+        sub: caller.subject.clone(),
+        name: caller.name.clone(),
+        email: caller.email.clone(),
+        roles: caller.roles.clone(),
+        permissions: caller.permissions.clone(),
+    })
 }
 
 #[cfg(test)]

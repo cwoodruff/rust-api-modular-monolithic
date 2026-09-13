@@ -13,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
 
 use crate::ProblemDetails;
-use crate::errors::new_trace_id;
+use crate::errors::{ApiError, current_trace_id};
 
 /// A JSON request body.
 ///
@@ -26,12 +26,12 @@ where
     T: DeserializeOwned,
     S: Send + Sync,
 {
-    type Rejection = MalformedRequest;
+    type Rejection = ApiError;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::Json::<T>::from_request(request, state).await {
             Ok(axum::Json(value)) => Ok(Self(value)),
-            Err(rejection) => Err(MalformedRequest::from(rejection)),
+            Err(rejection) => Err(ApiError::Malformed(MalformedRequest::from(rejection))),
         }
     }
 }
@@ -67,10 +67,18 @@ impl MalformedRequest {
     /// `Malformed request.`.
     #[must_use]
     pub fn into_problem(self) -> ProblemDetails {
+        let trace_id = current_trace_id();
+
+        self.into_problem_with(trace_id)
+    }
+
+    /// The problem document this becomes, under an explicit trace identifier.
+    #[must_use]
+    pub fn into_problem_with(self, trace_id: impl Into<String>) -> ProblemDetails {
         if self.status == StatusCode::BAD_REQUEST {
-            ProblemDetails::malformed_request(self.status, self.detail, new_trace_id())
+            ProblemDetails::malformed_request(self.status, self.detail, trace_id)
         } else {
-            crate::errors::status_code_page(self.status, new_trace_id())
+            crate::errors::status_code_page(self.status, trace_id)
         }
     }
 }
