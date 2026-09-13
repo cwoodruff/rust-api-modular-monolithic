@@ -60,7 +60,7 @@ impl Repository<Invoice> for SqliteInvoiceRepository {
                RETURNING {INVOICE_COLUMNS}"#
         ))
         .bind(entity.customer_id)
-        .bind(entity.invoice_date)
+        .bind(rows::timestamp_text(Some(entity.invoice_date)))
         .bind(&entity.billing_address)
         .bind(&entity.billing_city)
         .bind(&entity.billing_state)
@@ -86,7 +86,7 @@ impl Repository<Invoice> for SqliteInvoiceRepository {
                WHERE "Id" = ?"#,
         )
         .bind(entity.customer_id)
-        .bind(entity.invoice_date)
+        .bind(rows::timestamp_text(Some(entity.invoice_date)))
         .bind(&entity.billing_address)
         .bind(&entity.billing_city)
         .bind(&entity.billing_state)

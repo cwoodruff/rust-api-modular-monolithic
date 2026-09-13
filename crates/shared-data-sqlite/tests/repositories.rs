@@ -21,13 +21,17 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, TimeZone, Utc};
+use rust_decimal::Decimal;
 use shared_data_sqlite::{
     SqliteAlbumRepository, SqliteArtistRepository, SqliteCustomerRepository,
     SqliteEmployeeRepository, SqliteGenreRepository, SqliteInvoiceLineRepository,
     SqliteInvoiceRepository, SqliteMediaTypeRepository, SqlitePlaylistRepository,
     SqliteTrackRepository, create_pool,
 };
-use shared_persistence::entities::Genre;
+use shared_persistence::entities::{
+    Album, Artist, Customer, Employee, Genre, Invoice, InvoiceLine, MediaType, Playlist, Track,
+};
 use shared_persistence::repositories::{
     AlbumRepository, ArtistRepository, CustomerRepository, EmployeeRepository, GenreRepository,
     InvoiceLineRepository, InvoiceRepository, MediaTypeRepository, PlaylistRepository, Repository,
@@ -710,4 +714,620 @@ async fn a_created_genre_round_trips_through_the_collection() {
         after.iter().any(|genre| genre.id == created.id),
         "the new genre should appear in the collection"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Writes — every entity, not just the one with endpoints
+// ---------------------------------------------------------------------------
+//
+// Nine of the ten repositories expose `add`, `update` and `delete` that no
+// route reaches, so nothing exercised them and nothing would have noticed them
+// breaking. They did break: an `Employee` or `Invoice` written here went out
+// through sqlx's `DateTime` encoder as RFC 3339, which `rows::timestamp`
+// could not parse, so a birth date came back `None` and an invoice date came
+// back as the Unix epoch. The round-trip assertions below are what catch that
+// class of fault, which is why each one reads the row back rather than
+// trusting what `add` returned.
+
+/// An instant with no fractional part, which is what the file's rows carry.
+fn instant(year: i32, month: u32, day: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(year, month, day, 0, 0, 0)
+        .single()
+        .expect("a valid instant")
+}
+
+fn money(value: &str) -> Decimal {
+    value.parse().expect("a valid decimal")
+}
+
+#[tokio::test]
+async fn an_artist_can_be_written_read_back_updated_and_deleted() {
+    let scratch = ScratchDatabase::new("artist-writes");
+    let repository = SqliteArtistRepository::new(scratch.pool().await);
+
+    let created = repository
+        .add(Artist {
+            id: 0,
+            name: Some("Slowdive".to_owned()),
+        })
+        .await
+        .unwrap();
+
+    assert!(created.id > 0);
+    assert_eq!(created.name.as_deref(), Some("Slowdive"));
+
+    assert!(
+        repository
+            .update(Artist {
+                id: created.id,
+                name: Some("Ride".to_owned()),
+            })
+            .await
+            .unwrap()
+    );
+
+    let reread = repository
+        .get_all()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|artist| artist.id == created.id)
+        .expect("the updated artist should still be there");
+    assert_eq!(reread.name.as_deref(), Some("Ride"));
+
+    assert!(repository.delete(created.id).await.unwrap());
+    assert!(!repository.entity_exists(created.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn an_album_can_be_written_read_back_updated_and_deleted() {
+    let scratch = ScratchDatabase::new("album-writes");
+    let repository = SqliteAlbumRepository::new(scratch.pool().await);
+
+    let created = repository
+        .add(Album {
+            id: 0,
+            title: Some("Souvlaki".to_owned()),
+            artist_id: Some(1),
+        })
+        .await
+        .unwrap();
+
+    assert!(created.id > 0);
+    assert_eq!(created.artist_id, Some(1));
+
+    assert!(
+        repository
+            .update(Album {
+                id: created.id,
+                title: Some("Pygmalion".to_owned()),
+                artist_id: Some(2),
+            })
+            .await
+            .unwrap()
+    );
+
+    let reread = repository
+        .get_all()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|album| album.id == created.id)
+        .expect("the updated album should still be there");
+    assert_eq!(reread.title.as_deref(), Some("Pygmalion"));
+    assert_eq!(reread.artist_id, Some(2));
+
+    assert!(repository.delete(created.id).await.unwrap());
+    assert!(!repository.entity_exists(created.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_track_round_trips_its_money_and_its_three_foreign_keys() {
+    let scratch = ScratchDatabase::new("track-writes");
+    let repository = SqliteTrackRepository::new(scratch.pool().await);
+
+    let written = Track {
+        id: 0,
+        name: Some("Alison".to_owned()),
+        album_id: Some(1),
+        media_type_id: Some(1),
+        genre_id: Some(1),
+        composer: Some("Halstead".to_owned()),
+        milliseconds: Some(233_000),
+        bytes: Some(7_654_321),
+        unit_price: Some(money("0.99")),
+    };
+
+    let created = repository.add(written.clone()).await.unwrap();
+
+    assert!(created.id > 0);
+    assert_eq!(
+        Track {
+            id: 0,
+            ..created.clone()
+        },
+        written,
+        "every scalar should survive the insert"
+    );
+
+    let updated = Track {
+        unit_price: Some(money("1.29")),
+        milliseconds: Some(240_000),
+        ..created.clone()
+    };
+    assert!(repository.update(updated.clone()).await.unwrap());
+
+    let reread = repository
+        .get_all()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|track| track.id == created.id)
+        .expect("the updated track should still be there");
+    assert_eq!(
+        reread, updated,
+        "the money column is declared decimal and stored real; it must not drift"
+    );
+
+    assert!(repository.delete(created.id).await.unwrap());
+    assert!(!repository.entity_exists(created.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_playlist_can_be_written_read_back_updated_and_deleted() {
+    let scratch = ScratchDatabase::new("playlist-writes");
+    let repository = SqlitePlaylistRepository::new(scratch.pool().await);
+
+    let created = repository
+        .add(Playlist {
+            id: 0,
+            name: Some("Late Night".to_owned()),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        repository
+            .update(Playlist {
+                id: created.id,
+                name: Some("Early Morning".to_owned()),
+            })
+            .await
+            .unwrap()
+    );
+
+    let reread = repository
+        .get_by_id(created.id)
+        .await
+        .unwrap()
+        .expect("the updated playlist should be readable");
+    assert_eq!(reread.name.as_deref(), Some("Early Morning"));
+    assert!(reread.tracks.is_empty());
+
+    assert!(repository.delete(created.id).await.unwrap());
+    assert!(!repository.entity_exists(created.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_media_type_can_be_written_read_back_updated_and_deleted() {
+    let scratch = ScratchDatabase::new("mediatype-writes");
+    let repository = SqliteMediaTypeRepository::new(scratch.pool().await);
+
+    let created = repository
+        .add(MediaType {
+            id: 0,
+            name: Some("Opus audio file".to_owned()),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        repository
+            .update(MediaType {
+                id: created.id,
+                name: Some("FLAC audio file".to_owned()),
+            })
+            .await
+            .unwrap()
+    );
+
+    let reread = repository
+        .get_by_id(created.id)
+        .await
+        .unwrap()
+        .expect("the updated media type should be readable");
+    assert_eq!(reread.name.as_deref(), Some("FLAC audio file"));
+
+    assert!(repository.delete(created.id).await.unwrap());
+    assert!(!repository.entity_exists(created.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_customer_round_trips_all_twelve_of_its_columns() {
+    let scratch = ScratchDatabase::new("customer-writes");
+    let repository = SqliteCustomerRepository::new(scratch.pool().await);
+
+    let written = Customer {
+        id: 0,
+        first_name: Some("Ada".to_owned()),
+        last_name: Some("Lovelace".to_owned()),
+        company: Some("Analytical Engines".to_owned()),
+        address: Some("12 Marylebone".to_owned()),
+        city: Some("London".to_owned()),
+        state: None,
+        country: Some("United Kingdom".to_owned()),
+        postal_code: Some("W1U 5AA".to_owned()),
+        phone: Some("+44 20 7946 0000".to_owned()),
+        fax: None,
+        email: Some("ada@example.com".to_owned()),
+        support_rep_id: Some(3),
+    };
+
+    let created = repository.add(written.clone()).await.unwrap();
+
+    assert!(created.id > 0);
+    assert_eq!(
+        Customer {
+            id: 0,
+            ..created.clone()
+        },
+        written
+    );
+
+    let updated = Customer {
+        city: Some("Oxford".to_owned()),
+        state: Some("Oxfordshire".to_owned()),
+        support_rep_id: Some(4),
+        ..created.clone()
+    };
+    assert!(repository.update(updated.clone()).await.unwrap());
+
+    let reread = repository
+        .get_all()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|customer| customer.id == created.id)
+        .expect("the updated customer should still be there");
+    assert_eq!(reread, updated);
+
+    assert!(repository.delete(created.id).await.unwrap());
+    assert!(!repository.entity_exists(created.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn an_employees_dates_survive_being_written_and_read_back() {
+    // The round trip the timestamp encoding exists for. Before it, both dates
+    // came back `None` and the failure was invisible: the insert succeeded and
+    // every other column was right.
+    let scratch = ScratchDatabase::new("employee-writes");
+    let repository = SqliteEmployeeRepository::new(scratch.pool().await);
+
+    let written = Employee {
+        id: 0,
+        last_name: Some("Hopper".to_owned()),
+        first_name: Some("Grace".to_owned()),
+        title: Some("Rear Admiral".to_owned()),
+        reports_to: Some(1),
+        birth_date: Some(instant(1906, 12, 9)),
+        hire_date: Some(instant(1944, 7, 2)),
+        address: Some("1 Navy Yard".to_owned()),
+        city: Some("Arlington".to_owned()),
+        state: Some("VA".to_owned()),
+        country: Some("USA".to_owned()),
+        postal_code: Some("22202".to_owned()),
+        phone: Some("+1 (703) 555-0100".to_owned()),
+        fax: None,
+        email: Some("grace@example.com".to_owned()),
+    };
+
+    let created = repository.add(written.clone()).await.unwrap();
+
+    assert_eq!(
+        created.birth_date,
+        Some(instant(1906, 12, 9)),
+        "the insert should hand back the date it was given"
+    );
+
+    let reread = repository
+        .get_reports_to(created.id)
+        .await
+        .unwrap()
+        .expect("the new employee should be readable");
+    assert_eq!(
+        Employee {
+            id: 0,
+            ..reread.clone()
+        },
+        written,
+        "every column, dates included, should survive the round trip"
+    );
+
+    let updated = Employee {
+        hire_date: Some(instant(1949, 3, 14)),
+        title: Some("Systems Engineer".to_owned()),
+        ..created.clone()
+    };
+    assert!(repository.update(updated.clone()).await.unwrap());
+
+    let after_update = repository
+        .get_reports_to(created.id)
+        .await
+        .unwrap()
+        .expect("the updated employee should be readable");
+    assert_eq!(after_update, updated);
+    assert_eq!(after_update.hire_date, Some(instant(1949, 3, 14)));
+    assert_eq!(
+        after_update.birth_date,
+        Some(instant(1906, 12, 9)),
+        "an update must not quietly blank the column it rewrote unchanged"
+    );
+
+    assert!(repository.delete(created.id).await.unwrap());
+    assert!(!repository.entity_exists(created.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn an_employee_written_with_no_dates_reads_back_with_none() {
+    // The other half: a genuinely absent date must stay absent rather than
+    // arriving as some default.
+    let scratch = ScratchDatabase::new("employee-null-dates");
+    let repository = SqliteEmployeeRepository::new(scratch.pool().await);
+
+    let created = repository
+        .add(Employee {
+            id: 0,
+            last_name: Some("Unknown".to_owned()),
+            first_name: Some("Dates".to_owned()),
+            ..Employee::default()
+        })
+        .await
+        .unwrap();
+
+    let reread = repository
+        .get_reports_to(created.id)
+        .await
+        .unwrap()
+        .expect("the new employee should be readable");
+
+    assert_eq!(reread.birth_date, None);
+    assert_eq!(reread.hire_date, None);
+}
+
+#[tokio::test]
+async fn an_invoices_date_and_total_survive_being_written_and_read_back() {
+    // `invoice_date` is not optional, so a timestamp that failed to parse came
+    // back as the Unix epoch rather than as `None` — a wrong answer that looks
+    // like a real one.
+    let scratch = ScratchDatabase::new("invoice-writes");
+    let repository = SqliteInvoiceRepository::new(scratch.pool().await);
+
+    let written = Invoice {
+        id: 0,
+        customer_id: Some(1),
+        invoice_date: instant(2011, 5, 22),
+        billing_address: Some("12 Marylebone".to_owned()),
+        billing_city: Some("London".to_owned()),
+        billing_state: None,
+        billing_country: Some("United Kingdom".to_owned()),
+        billing_postal_code: Some("W1U 5AA".to_owned()),
+        total: money("13.86"),
+    };
+
+    let created = repository.add(written.clone()).await.unwrap();
+
+    assert!(created.id > 0);
+    assert_eq!(
+        Invoice {
+            id: 0,
+            ..created.clone()
+        },
+        written
+    );
+
+    let reread = repository
+        .get_by_customer_id(1)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|invoice| invoice.id == created.id)
+        .expect("the new invoice should be readable");
+    assert_eq!(
+        reread.invoice_date,
+        instant(2011, 5, 22),
+        "a date that failed to parse would silently read as the epoch"
+    );
+    assert_ne!(reread.invoice_date, DateTime::UNIX_EPOCH);
+    assert_eq!(reread.total, money("13.86"));
+
+    let updated = Invoice {
+        invoice_date: instant(2011, 6, 1),
+        total: money("21.00"),
+        ..created.clone()
+    };
+    assert!(repository.update(updated.clone()).await.unwrap());
+
+    let after_update = repository
+        .get_by_customer_id(1)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|invoice| invoice.id == created.id)
+        .expect("the updated invoice should be readable");
+    assert_eq!(after_update, updated);
+
+    assert!(repository.delete(created.id).await.unwrap());
+    assert!(!repository.entity_exists(created.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn an_invoice_line_can_be_written_read_back_updated_and_deleted() {
+    let scratch = ScratchDatabase::new("invoiceline-writes");
+    let repository = SqliteInvoiceLineRepository::new(scratch.pool().await);
+
+    let written = InvoiceLine {
+        id: 0,
+        invoice_id: Some(1),
+        track_id: Some(1),
+        unit_price: Some(money("0.99")),
+        quantity: Some(2),
+    };
+
+    let created = repository.add(written.clone()).await.unwrap();
+
+    assert!(created.id > 0);
+    assert_eq!(
+        InvoiceLine {
+            id: 0,
+            ..created.clone()
+        },
+        written
+    );
+
+    let updated = InvoiceLine {
+        quantity: Some(5),
+        unit_price: Some(money("1.99")),
+        ..created.clone()
+    };
+    assert!(repository.update(updated.clone()).await.unwrap());
+
+    let reread = repository
+        .get_by_id(created.id)
+        .await
+        .unwrap()
+        .expect("the updated line should be readable");
+    assert_eq!(reread, updated);
+
+    assert!(repository.delete(created.id).await.unwrap());
+    assert!(repository.get_by_id(created.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn updating_or_deleting_a_missing_row_reports_false_for_every_entity() {
+    // Each of these is what lets an endpoint answer 404 rather than 500, and
+    // only Genre had a test for it.
+    let scratch = ScratchDatabase::new("missing-rows");
+    let pool = scratch.pool().await;
+    let absent = 999_999;
+
+    assert!(
+        !SqliteArtistRepository::new(pool.clone())
+            .update(Artist {
+                id: absent,
+                name: Some("Nobody".to_owned()),
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        !SqliteAlbumRepository::new(pool.clone())
+            .update(Album {
+                id: absent,
+                title: Some("Nothing".to_owned()),
+                artist_id: Some(1),
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        !SqliteTrackRepository::new(pool.clone())
+            .update(Track {
+                id: absent,
+                name: Some("Nothing".to_owned()),
+                ..Track::default()
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        !SqlitePlaylistRepository::new(pool.clone())
+            .update(Playlist {
+                id: absent,
+                name: Some("Nothing".to_owned()),
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        !SqliteMediaTypeRepository::new(pool.clone())
+            .update(MediaType {
+                id: absent,
+                name: Some("Nothing".to_owned()),
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        !SqliteCustomerRepository::new(pool.clone())
+            .update(Customer {
+                id: absent,
+                ..Customer::default()
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        !SqliteEmployeeRepository::new(pool.clone())
+            .update(Employee {
+                id: absent,
+                ..Employee::default()
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        !SqliteInvoiceRepository::new(pool.clone())
+            .update(Invoice {
+                id: absent,
+                customer_id: None,
+                invoice_date: instant(2011, 5, 22),
+                billing_address: None,
+                billing_city: None,
+                billing_state: None,
+                billing_country: None,
+                billing_postal_code: None,
+                total: money("0.00"),
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        !SqliteInvoiceLineRepository::new(pool.clone())
+            .update(InvoiceLine {
+                id: absent,
+                ..InvoiceLine::default()
+            })
+            .await
+            .unwrap()
+    );
+
+    for deleted in [
+        SqliteArtistRepository::new(pool.clone())
+            .delete(absent)
+            .await,
+        SqliteAlbumRepository::new(pool.clone())
+            .delete(absent)
+            .await,
+        SqliteTrackRepository::new(pool.clone())
+            .delete(absent)
+            .await,
+        SqlitePlaylistRepository::new(pool.clone())
+            .delete(absent)
+            .await,
+        SqliteMediaTypeRepository::new(pool.clone())
+            .delete(absent)
+            .await,
+        SqliteCustomerRepository::new(pool.clone())
+            .delete(absent)
+            .await,
+        SqliteEmployeeRepository::new(pool.clone())
+            .delete(absent)
+            .await,
+        SqliteInvoiceRepository::new(pool.clone())
+            .delete(absent)
+            .await,
+        SqliteInvoiceLineRepository::new(pool).delete(absent).await,
+    ] {
+        assert!(!deleted.unwrap(), "deleting a missing row reports false");
+    }
 }

@@ -69,17 +69,47 @@ pub(crate) fn timestamp(row: &SqliteRow, column: &str) -> Result<Option<DateTime
         .map(|naive| naive.and_utc()))
 }
 
+/// The form timestamps are written in, and the form every existing row holds.
+///
+/// EF Core's SQLite encoding: `2007-01-02 00:00:00.000000 +00:00`. Six
+/// fractional digits, a space, then the offset.
+const STORED_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.6f %:z";
+
+/// Renders a timestamp for binding.
+///
+/// Without this a write goes out through sqlx's own `DateTime` encoder, which
+/// writes RFC 3339 — `2007-01-02T00:00:00+00:00`. That is a perfectly good
+/// timestamp and [`parse_timestamp`] now reads it, but it is not the form the
+/// other 8,000 rows are in, and a column holding two encodings sorts and
+/// compares by text in SQLite. Writes therefore go out in the form the file
+/// already uses, so a row this port writes is indistinguishable from one EF
+/// Core wrote.
+pub(crate) fn timestamp_text(value: Option<DateTime<Utc>>) -> Option<String> {
+    value.map(|instant| instant.format(STORED_TIMESTAMP_FORMAT).to_string())
+}
+
 /// Parses the timestamp formats this database is written in.
 ///
 /// The stored form is `2007-01-02 00:00:00.000000 +00:00` — EF Core's SQLite
 /// encoding. The offset is dropped rather than applied: the original reads the
 /// column into a `DateTime` and serializes the wall-clock value, so shifting it
 /// would move every date on the wire.
+///
+/// RFC 3339 is accepted too. It is not what this port writes, but it is what
+/// sqlx's own encoder produces, so a row written by an earlier build of this
+/// code — or by any other sqlx caller — reads back rather than silently
+/// arriving as `None`.
 fn parse_timestamp(value: &str) -> Option<NaiveDateTime> {
     let trimmed = value.trim();
 
-    if let Ok(with_offset) = DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f %:z") {
-        return Some(with_offset.naive_local());
+    for format in [STORED_TIMESTAMP_FORMAT, "%Y-%m-%d %H:%M:%S%.f %:z"] {
+        if let Ok(with_offset) = DateTime::parse_from_str(trimmed, format) {
+            return Some(with_offset.naive_local());
+        }
+    }
+
+    if let Ok(rfc3339) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(rfc3339.naive_local());
     }
 
     for format in [
@@ -256,6 +286,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn the_stored_timestamp_format_parses_without_shifting_the_clock() {
@@ -289,6 +320,52 @@ mod tests {
         ] {
             assert!(parse_timestamp(value).is_some(), "{value} should parse");
         }
+    }
+
+    #[test]
+    fn a_written_timestamp_reads_back_as_the_instant_that_was_written() {
+        // The round trip that did not close before: a value bound through
+        // sqlx's own encoder came back out of `timestamp` as `None`, so an
+        // employee's birth date silently vanished on every update and an
+        // invoice date fell back to the epoch.
+        let written = Utc
+            .with_ymd_and_hms(2007, 1, 2, 9, 30, 15)
+            .single()
+            .expect("a valid instant");
+
+        let rendered = timestamp_text(Some(written)).expect("a present value renders");
+
+        assert_eq!(rendered, "2007-01-02 09:30:15.000000 +00:00");
+        assert_eq!(
+            parse_timestamp(&rendered).map(|naive| naive.and_utc()),
+            Some(written)
+        );
+    }
+
+    #[test]
+    fn a_written_timestamp_looks_exactly_like_the_rows_already_in_the_file() {
+        // Same encoding as the 8,000 rows EF Core wrote, so the column does not
+        // end up holding two text formats that sort against each other.
+        let instant = Utc
+            .with_ymd_and_hms(2007, 1, 2, 0, 0, 0)
+            .single()
+            .expect("a valid instant");
+
+        assert_eq!(
+            timestamp_text(Some(instant)).as_deref(),
+            Some("2007-01-02 00:00:00.000000 +00:00")
+        );
+        assert_eq!(timestamp_text(None), None);
+    }
+
+    #[test]
+    fn the_encoding_sqlx_would_have_written_still_reads() {
+        // Not what this port writes, but rows may already carry it.
+        let parsed =
+            parse_timestamp("2007-01-02T00:00:00+00:00").expect("RFC 3339 should still parse");
+
+        assert_eq!(parsed.to_string(), "2007-01-02 00:00:00");
+        assert!(parse_timestamp("2007-01-02T00:00:00Z").is_some());
     }
 
     #[test]
