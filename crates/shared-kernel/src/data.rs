@@ -13,20 +13,25 @@ use crate::errors::{ApiError, current_trace_id};
 
 /// Something went wrong talking to the database.
 ///
-/// The driver's own error type is boxed because neither this crate nor the
+/// The driver's own error type is erased because neither this crate nor the
 /// contracts crate may depend on a driver. The C# equivalent is an unhandled
 /// exception, which the host turns into a 500.
-#[derive(Debug, thiserror::Error)]
+///
+/// The cause is held behind an `Arc` rather than a `Box` so this is `Clone`.
+/// The cache facade needs that: when several callers coalesce onto one factory
+/// call and it fails, every one of them has to be handed the failure, and a
+/// boxed error can only be handed to one.
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum RepositoryError {
     /// The underlying database reported a failure.
     #[error("database operation failed")]
-    Database(#[source] Box<dyn std::error::Error + Send + Sync>),
+    Database(#[source] std::sync::Arc<dyn std::error::Error + Send + Sync>),
 }
 
 impl RepositoryError {
     /// Wraps a driver error.
     pub fn database(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
-        Self::Database(source.into())
+        Self::Database(std::sync::Arc::from(source.into()))
     }
 
     /// The 500 the host returns, leaking nothing about the cause.
