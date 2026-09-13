@@ -61,19 +61,16 @@ impl Repository<Album> for SqliteAlbumRepository {
     }
 
     async fn update(&self, entity: Album) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
+        let updated =
+            sqlx::query(r#"UPDATE "Album" SET "Title" = ?, "ArtistId" = ? WHERE "Id" = ?"#)
+                .bind(&entity.title)
+                .bind(entity.artist_id)
+                .bind(entity.id)
+                .execute(&self.pool)
+                .await
+                .map_err(common::database)?;
 
-        sqlx::query(r#"UPDATE "Album" SET "Title" = ?, "ArtistId" = ? WHERE "Id" = ?"#)
-            .bind(&entity.title)
-            .bind(entity.artist_id)
-            .bind(entity.id)
-            .execute(&self.pool)
-            .await
-            .map_err(common::database)?;
-
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {
@@ -216,18 +213,14 @@ impl Repository<Artist> for SqliteArtistRepository {
     }
 
     async fn update(&self, entity: Artist) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
-
-        sqlx::query(r#"UPDATE "Artist" SET "Name" = ? WHERE "Id" = ?"#)
+        let updated = sqlx::query(r#"UPDATE "Artist" SET "Name" = ? WHERE "Id" = ?"#)
             .bind(&entity.name)
             .bind(entity.id)
             .execute(&self.pool)
             .await
             .map_err(common::database)?;
 
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {
@@ -391,11 +384,7 @@ impl Repository<Track> for SqliteTrackRepository {
     }
 
     async fn update(&self, entity: Track) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
-
-        sqlx::query(
+        let updated = sqlx::query(
             r#"UPDATE "Track" SET "Name" = ?, "AlbumId" = ?, "MediaTypeId" = ?, "GenreId" = ?,
                                   "Composer" = ?, "Milliseconds" = ?, "Bytes" = ?, "UnitPrice" = ?
                WHERE "Id" = ?"#,
@@ -413,7 +402,7 @@ impl Repository<Track> for SqliteTrackRepository {
         .await
         .map_err(common::database)?;
 
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {
@@ -524,18 +513,14 @@ impl Repository<Playlist> for SqlitePlaylistRepository {
     }
 
     async fn update(&self, entity: Playlist) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
-
-        sqlx::query(r#"UPDATE "Playlist" SET "Name" = ? WHERE "Id" = ?"#)
+        let updated = sqlx::query(r#"UPDATE "Playlist" SET "Name" = ? WHERE "Id" = ?"#)
             .bind(&entity.name)
             .bind(entity.id)
             .execute(&self.pool)
             .await
             .map_err(common::database)?;
 
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {

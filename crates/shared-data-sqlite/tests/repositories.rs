@@ -1331,3 +1331,54 @@ async fn updating_or_deleting_a_missing_row_reports_false_for_every_entity() {
         assert!(!deleted.unwrap(), "deleting a missing row reports false");
     }
 }
+
+#[tokio::test]
+async fn an_update_that_changes_nothing_still_reports_that_the_row_was_there() {
+    // The one subtlety of reporting `rows_affected`: SQLite counts a row the
+    // statement processed, not one whose bytes changed. If it did not, writing
+    // a genre its existing name would look exactly like writing a genre that
+    // does not exist, and the endpoint would answer 404 for a row it can see.
+    let scratch = ScratchDatabase::new("idempotent-update");
+    let repository = SqliteGenreRepository::new(scratch.pool().await);
+
+    let created = repository
+        .add(Genre {
+            id: 0,
+            name: Some("Ambient".to_owned()),
+        })
+        .await
+        .unwrap();
+
+    let unchanged = Genre {
+        id: created.id,
+        name: Some("Ambient".to_owned()),
+    };
+
+    assert!(repository.update(unchanged.clone()).await.unwrap());
+    assert!(
+        repository.update(unchanged).await.unwrap(),
+        "and again, for good measure"
+    );
+}
+
+#[tokio::test]
+async fn a_second_delete_of_the_same_row_reports_false() {
+    // What the statement itself reports, rather than what a separate existence
+    // check said a moment earlier.
+    let scratch = ScratchDatabase::new("double-delete");
+    let repository = SqliteGenreRepository::new(scratch.pool().await);
+
+    let created = repository
+        .add(Genre {
+            id: 0,
+            name: Some("Gone".to_owned()),
+        })
+        .await
+        .unwrap();
+
+    assert!(repository.delete(created.id).await.unwrap());
+    assert!(
+        !repository.delete(created.id).await.unwrap(),
+        "the row is already gone"
+    );
+}

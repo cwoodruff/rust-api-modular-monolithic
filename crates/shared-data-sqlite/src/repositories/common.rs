@@ -15,6 +15,10 @@ pub(crate) fn database(error: sqlx::Error) -> RepositoryError {
 
 /// Port of `BaseRepository.EntityExists`.
 ///
+/// Part of the repository contract, so it stays — but note that no *write* uses
+/// it any more. A write reports what its own statement did; see
+/// [`delete_by_id`].
+///
 /// `table` is interpolated rather than bound because SQL has no parameter slot
 /// for an identifier. Every caller passes one of the module-level constants
 /// below, never anything derived from a request.
@@ -34,24 +38,33 @@ pub(crate) async fn exists(pool: &SqlitePool, table: &str, id: i32) -> Repositor
 ///
 /// Reports `false` for a row that is not there rather than treating it as an
 /// error, which is what lets the Genre endpoint answer 404 instead of 500.
+///
+/// # One statement, not two
+///
+/// This used to ask whether the row existed and then delete it. Two statements,
+/// no transaction between them, so the answer to the first was already stale by
+/// the time the second ran: a row deleted in between turned a concurrent
+/// `DELETE` into a reported success that deleted nothing, and the client got a
+/// 204 for a row someone else had removed. The same shape in `update` reported
+/// success for a row that had just gone.
+///
+/// A statement already knows how many rows it touched. Asking it is one round
+/// trip instead of two, and the answer describes what actually happened rather
+/// than what was true a moment earlier.
 pub(crate) async fn delete_by_id(
     pool: &SqlitePool,
     table: &str,
     id: i32,
 ) -> RepositoryResult<bool> {
-    if !exists(pool, table, id).await? {
-        return Ok(false);
-    }
-
     let statement = format!(r#"DELETE FROM "{table}" WHERE "Id" = ?"#);
 
-    sqlx::query(&statement)
+    let deleted = sqlx::query(&statement)
         .bind(id)
         .execute(pool)
         .await
         .map_err(database)?;
 
-    Ok(true)
+    Ok(deleted.rows_affected() > 0)
 }
 
 /// Table names, matching the singular names the C# `AppDbContext` maps to.

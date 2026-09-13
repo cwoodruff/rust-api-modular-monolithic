@@ -75,11 +75,7 @@ impl Repository<Invoice> for SqliteInvoiceRepository {
     }
 
     async fn update(&self, entity: Invoice) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
-
-        sqlx::query(
+        let updated = sqlx::query(
             r#"UPDATE "Invoice" SET "CustomerId" = ?, "InvoiceDate" = ?, "BillingAddress" = ?,
                                     "BillingCity" = ?, "BillingState" = ?, "BillingCountry" = ?,
                                     "BillingPostalCode" = ?, "Total" = ?
@@ -98,7 +94,7 @@ impl Repository<Invoice> for SqliteInvoiceRepository {
         .await
         .map_err(common::database)?;
 
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {
@@ -294,11 +290,7 @@ impl Repository<InvoiceLine> for SqliteInvoiceLineRepository {
     }
 
     async fn update(&self, entity: InvoiceLine) -> RepositoryResult<bool> {
-        if !self.entity_exists(entity.id).await? {
-            return Ok(false);
-        }
-
-        sqlx::query(
+        let updated = sqlx::query(
             r#"UPDATE "InvoiceLine" SET "InvoiceId" = ?, "TrackId" = ?, "UnitPrice" = ?,
                                         "Quantity" = ?
                WHERE "Id" = ?"#,
@@ -312,7 +304,7 @@ impl Repository<InvoiceLine> for SqliteInvoiceLineRepository {
         .await
         .map_err(common::database)?;
 
-        Ok(true)
+        Ok(updated.rows_affected() > 0)
     }
 
     async fn delete(&self, id: i32) -> RepositoryResult<bool> {
