@@ -67,7 +67,7 @@ curl -s -H "Authorization: Bearer $TOKEN" localhost:5043/api/music/albums/1
 
 ```sh
 cargo build --workspace
-cargo test --workspace          # 332 tests
+cargo test --workspace          # 409 tests
 
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -84,6 +84,38 @@ Builds both, starts them side by side with the same seeded logins and a
 database copy each, sweeps every case, and stops them. Needs the .NET SDK;
 without it the script says so and exits cleanly. See
 [docs/parity.md](docs/parity.md).
+
+### One header the sweep cannot see
+
+Every response from this port carries an `x-trace-id`. The original sends no
+such header.
+
+```sh
+curl -s -D - -o /dev/null localhost:5043/api/music/health | grep -i '^x-trace-id'
+```
+```
+x-trace-id: 00-04a86a70afbf2f376882fad2b057433e-b8fe0ae130e34d7f-00
+```
+
+One identifier per request, and the same value in three places: that header,
+the `traceId` of any problem document the request produces, and the `tracing`
+span its log records are written under —
+
+```
+DEBUG request{trace_id=00-04a8…-b8fe… method=GET path=/api/music/albums/1}:
+      shared_kernel::auth: authorization refused policy="music.read" …
+```
+
+The original puts its `traceId` in problem documents only. That value is
+stable across one request there — it is the ambient activity id — so it does
+correlate with the server's own logs. What it cannot do is travel on a
+successful response: a client reporting a slow or wrong `200` has nothing to
+quote, because there is nothing in the response to quote.
+
+The sweep above reports no difference here, and that is not evidence: it
+compares nine named headers and this is not one of them. The change is additive
+— no body differs and no existing header is replaced — but it is wire-visible,
+so it is written down rather than left to a green run to imply.
 
 ## Docker
 
@@ -174,6 +206,13 @@ health metadata, and the development signing-key provider.
 
 Environment variables use the `__` separator and index arrays numerically, the
 way ASP.NET does: `Identity__InMemoryUsers__0__Username`.
+
+Four `Jwt:*` keys have no counterpart in the original, and all four are
+optional: `PemKeyPath` and `PemKeyEnvironmentVariable` feed the key providers
+the [Docker](#docker) section describes, `KeyId` overrides the `kid` derived
+from the key, and `KeyVaultVaultUri` is the correctly spelled form of the
+original's `KeyVaultVautUri` — which still binds, so a deployment already
+setting it keeps working.
 
 Unlike the original, the development RSA signing key is generated on first run
 and gitignored rather than committed.
