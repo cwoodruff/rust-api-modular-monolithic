@@ -53,7 +53,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["serde", "serde-float"] }
 
 # --- identity --------------------------------------------------------------
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 rsa = { version = "0.9", features = ["sha2"] }
 base64 = "0.22"
 # Only for the RFC 7638 JWK thumbprint the PEM provider derives its `kid` from.
