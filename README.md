@@ -67,7 +67,7 @@ curl -s -H "Authorization: Bearer $TOKEN" localhost:5043/api/music/albums/1
 
 ```sh
 cargo build --workspace
-cargo test --workspace          # 332 tests
+cargo test --workspace          # 409 tests
 
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -174,6 +174,13 @@ health metadata, and the development signing-key provider.
 
 Environment variables use the `__` separator and index arrays numerically, the
 way ASP.NET does: `Identity__InMemoryUsers__0__Username`.
+
+Four `Jwt:*` keys have no counterpart in the original, and all four are
+optional: `PemKeyPath` and `PemKeyEnvironmentVariable` feed the key providers
+the [Docker](#docker) section describes, `KeyId` overrides the `kid` derived
+from the key, and `KeyVaultVaultUri` is the correctly spelled form of the
+original's `KeyVaultVautUri` — which still binds, so a deployment already
+setting it keeps working.
 
 Unlike the original, the development RSA signing key is generated on first run
 and gitignored rather than committed.

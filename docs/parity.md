@@ -106,6 +106,7 @@ effects:
 | F7 | Single-flight is exact rather than best-effort. Only ever reduces duplicate work. |
 | F8 | The in-process HTTPS redirect is left to the edge. It has no forwarded-headers configuration, so it redirect-loops behind a TLS terminator — and it is why the original's container cannot serve traffic. HSTS itself is reproduced. |
 | F9 | The data-health probe logs why it failed instead of discarding the reason. Same answer on the wire. |
+| F14 | **Every response carries an `x-trace-id` header.** The original's `traceId` appears only inside a problem document, so a 200 carries no identifier and a client reporting a slow or wrong response has nothing to quote. No body changes, and the header is additive — but note the harness cannot see it: `COMPARED_HEADERS` lists nine headers and this is not one of them. It is recorded here because it is wire-visible, not because a run found it. |
 | — | The Dockerfile produces a container that runs. The original's builds `net10.0` with the .NET 9 SDK, has no `.dockerignore`, and would exit at startup even if it built. |
 
 ## Quirks preserved
