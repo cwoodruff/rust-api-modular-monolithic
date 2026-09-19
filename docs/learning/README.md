@@ -48,9 +48,10 @@ trait objects from Phase 1 are assumed by Phase 5, and so on.
 
 ## Prerequisites
 
-- A stable Rust toolchain (the repository's `rust-toolchain.toml` selects
-  it; `rustup` installs it on first `cargo` invocation). The code uses
-  2024-edition let chains, which need Rust 1.88 or later.
+- A stable Rust toolchain, 1.88 or later (the repository's
+  `rust-toolchain.toml` selects the stable channel and `rustup` installs it on
+  first `cargo` invocation; `Cargo.toml` declares 1.88 as the minimum because
+  the code uses 2024-edition let chains).
 - `jq`, `curl`, and `sqlite3` for a few exercises.
 - Docker for Phase 9's exercises; the .NET 10 SDK only for running the
   parity harness in Phase 8.

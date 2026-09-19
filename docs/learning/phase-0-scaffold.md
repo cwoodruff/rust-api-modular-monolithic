@@ -43,7 +43,7 @@ Two things the workspace root does that a `.sln` cannot:
 [workspace.package]
 version = "1.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 ```
 
@@ -196,9 +196,10 @@ components = ["rustfmt", "clippy"]
 
 This is `global.json`. `rustup` reads it and makes sure the stable channel plus
 the formatter and linter are installed before `cargo` runs. Note it pins the
-*channel*, not a version — the workspace declares `rust-version = "1.85"` as
-its minimum, but the code already uses let chains, which need 1.88 or later.
-That is a small drift worth knowing about if you ever install an older stable.
+*channel*, not a version; the minimum the code actually needs is the
+`rust-version = "1.88"` in the workspace manifest, set there because the code
+uses let chains, which stabilized in 1.88. Cargo refuses to build on anything
+older and says so, which beats a confusing parse error.
 
 ---
 
