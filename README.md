@@ -185,6 +185,7 @@ concrete database driver.
 | [authn-authz.md](docs/authn-authz.md) | Tokens, claims, policies, the tenant guard |
 | [caching.md](docs/caching.md) | Keys, lifetimes, and the invalidation fix |
 | [parity.md](docs/parity.md) | How parity is verified, and where the two deliberately differ |
+| [learning/](docs/learning/README.md) | Ten Rust lessons, one per delivery phase, each walking the code that phase produced |
 
 ## Data
 
