@@ -225,6 +225,31 @@ pub mod dotnet {
             .map_err(serde::de::Error::custom)
     }
 
+    /// `#[serde(with = "dotnet::decimal")]` for a `Decimal` written as .NET writes one.
+    ///
+    /// `System.Text.Json` writes a decimal with its own scale: `3.96`, `1.00`,
+    /// and `0` for `0m`. The workspace serializes decimals as floats, which
+    /// agrees on every value with a fraction and turns `0m` into `0.0`. A
+    /// scale-zero decimal is written as an integer here, so a total no event
+    /// has added to reads `0`, as upstream's does.
+    pub mod decimal {
+        use rust_decimal::Decimal;
+        use rust_decimal::prelude::ToPrimitive;
+        use serde::Serializer;
+
+        /// Serializes.
+        ///
+        /// # Errors
+        ///
+        /// The serializer's.
+        pub fn serialize<S: Serializer>(value: &Decimal, serializer: S) -> Result<S::Ok, S::Error> {
+            match (value.scale(), value.to_i64()) {
+                (0, Some(whole)) => serializer.serialize_i64(whole),
+                _ => serializer.serialize_f64(value.to_f64().unwrap_or_default()),
+            }
+        }
+    }
+
     /// `#[serde(with = "dotnet::utc")]` for a `DateTime<Utc>` field written as a `DateTime`.
     pub mod utc {
         use super::{DateTime, Deserializer, Serializer, Utc};
@@ -365,6 +390,21 @@ pub mod dotnet {
 
             assert_eq!(date_time(&instant), "2026-10-16T02:00:00.12Z");
             assert_eq!(date_time_offset(&instant), "2026-10-16T02:00:00.12+00:00");
+        }
+
+        #[test]
+        fn a_scale_zero_decimal_is_written_as_an_integer() {
+            #[derive(serde::Serialize)]
+            struct Total(#[serde(with = "super::decimal")] rust_decimal::Decimal);
+
+            assert_eq!(
+                serde_json::to_string(&Total(rust_decimal::Decimal::ZERO)).unwrap(),
+                "0"
+            );
+            assert_eq!(
+                serde_json::to_string(&Total(rust_decimal::Decimal::new(396, 2))).unwrap(),
+                "3.96"
+            );
         }
 
         #[test]

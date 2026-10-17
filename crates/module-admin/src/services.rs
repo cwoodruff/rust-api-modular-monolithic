@@ -3,6 +3,13 @@
 //! Each reads its module's own tables through its own pool and caches reads
 //! cache-aside for twenty minutes under upstream's keys and tags. A lookup that
 //! finds nothing is not cached; purchases are never cached.
+//!
+//! Collections come back in the table's physical order (`ORDER BY ctid`),
+//! because upstream's list queries have no `ORDER BY` and PostgreSQL answers
+//! them in heap order. The seeded tracks are not stored in `Id` order, and an
+//! updated row moves to the end of its table, so ordering by `Id` would answer
+//! differently from the original — the parity harness caught exactly that.
+//! By-id projections keep the explicit order upstream's queries give them.
 
 use std::sync::Arc;
 
@@ -316,7 +323,7 @@ impl CustomerService for Customers {
         self.0
             .cached_list("customer", "all", CUSTOMER_TAGS, || async {
                 let rows = sqlx::query_as::<_, CustomerRow>(&format!(
-                    r#"SELECT {CUSTOMER_COLUMNS} FROM administration."Customer" ORDER BY "Id""#
+                    r#"SELECT {CUSTOMER_COLUMNS} FROM administration."Customer" ORDER BY ctid"#
                 ))
                 .fetch_all(pool)
                 .await?;
@@ -330,7 +337,7 @@ impl CustomerService for Customers {
         self.0
             .cached_list("customer", &format!("by-supportrep:{id}"), CUSTOMER_TAGS, || async {
                 let rows = sqlx::query_as::<_, CustomerRow>(&format!(
-                    r#"SELECT {CUSTOMER_COLUMNS} FROM administration."Customer" WHERE "SupportRepId" = $1 ORDER BY "Id""#
+                    r#"SELECT {CUSTOMER_COLUMNS} FROM administration."Customer" WHERE "SupportRepId" = $1 ORDER BY ctid"#
                 ))
                 .bind(id)
                 .fetch_all(pool)
@@ -416,7 +423,7 @@ impl EmployeeService for Employees {
         self.0
             .cached_list("employee", "all", EMPLOYEE_TAGS, || async {
                 let rows = sqlx::query_as::<_, EmployeeRow>(&format!(
-                    r#"SELECT {EMPLOYEE_COLUMNS} FROM administration."Employee" e ORDER BY e."Id""#
+                    r#"SELECT {EMPLOYEE_COLUMNS} FROM administration."Employee" e ORDER BY e.ctid"#
                 ))
                 .fetch_all(pool)
                 .await?;
@@ -430,7 +437,7 @@ impl EmployeeService for Employees {
         self.0
             .cached_list("employee", &format!("direct-reports:{id}"), EMPLOYEE_TAGS, || async {
                 let rows = sqlx::query_as::<_, EmployeeRow>(&format!(
-                    r#"SELECT {EMPLOYEE_COLUMNS} FROM administration."Employee" e WHERE e."ReportsTo" = $1 ORDER BY e."Id""#
+                    r#"SELECT {EMPLOYEE_COLUMNS} FROM administration."Employee" e WHERE e."ReportsTo" = $1 ORDER BY e.ctid"#
                 ))
                 .bind(id)
                 .fetch_all(pool)
@@ -508,7 +515,7 @@ impl GenreService for Genres {
         self.0
             .cached_list("genre", "all", GENRE_TAGS, || async {
                 let rows = sqlx::query_as::<_, NamedRow>(
-                    r#"SELECT "Id", "Name" FROM administration."Genre" ORDER BY "Id""#,
+                    r#"SELECT "Id", "Name" FROM administration."Genre" ORDER BY ctid"#,
                 )
                 .fetch_all(pool)
                 .await?;
@@ -625,7 +632,7 @@ impl MediaTypeService for MediaTypes {
         self.0
             .cached_list("mediatype", "all", MEDIA_TYPE_TAGS, || async {
                 let rows = sqlx::query_as::<_, NamedRow>(
-                    r#"SELECT "Id", "Name" FROM administration."MediaType" ORDER BY "Id""#,
+                    r#"SELECT "Id", "Name" FROM administration."MediaType" ORDER BY ctid"#,
                 )
                 .fetch_all(pool)
                 .await?;

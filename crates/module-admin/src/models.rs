@@ -78,6 +78,7 @@ pub(crate) struct MediaTypeApiModel {
 #[serde(rename_all = "PascalCase")]
 pub(crate) struct CustomerPurchasesApiModel {
     pub customer_id: i32,
+    #[serde(with = "dotnet::decimal")]
     pub total_spent: Decimal,
     pub invoice_count: i32,
     #[serde(with = "dotnet::utc_option")]

@@ -4,6 +4,13 @@
 //! layer — and caches reads cache-aside for twenty minutes under upstream's
 //! keys and tags. Finalization writes the invoice and its outbox row in one
 //! transaction, so `InvoiceFinalized` exists exactly when the status changed.
+//!
+//! Collections come back in the table's physical order (`ORDER BY ctid`),
+//! because upstream's list queries have no `ORDER BY` and PostgreSQL answers
+//! them in heap order. The seeded tracks are not stored in `Id` order, and an
+//! updated row moves to the end of its table, so ordering by `Id` would answer
+//! differently from the original — the parity harness caught exactly that.
+//! By-id projections keep the explicit order upstream's queries give them.
 
 use std::sync::Arc;
 
@@ -252,7 +259,7 @@ impl InvoiceService for Invoices {
         let pool = &self.store.pool;
         self.store
             .cached_list("invoice", "all", INVOICE_TAGS, || async {
-                invoices(pool, &format!(r#"{INVOICE_COLUMNS} ORDER BY "Id""#), None).await
+                invoices(pool, &format!(r#"{INVOICE_COLUMNS} ORDER BY ctid"#), None).await
             })
             .await
     }
@@ -267,7 +274,7 @@ impl InvoiceService for Invoices {
                 || async {
                     invoices(
                         pool,
-                        &format!(r#"{INVOICE_COLUMNS} WHERE "CustomerId" = $1 ORDER BY "Id""#),
+                        &format!(r#"{INVOICE_COLUMNS} WHERE "CustomerId" = $1 ORDER BY ctid"#),
                         Some(id),
                     )
                     .await
@@ -384,7 +391,7 @@ impl InvoiceLines {
                 || async move {
                     lines(
                         pool,
-                        &format!(r#"{LINE_COLUMNS} WHERE "{column}" = $1 ORDER BY "Id""#),
+                        &format!(r#"{LINE_COLUMNS} WHERE "{column}" = $1 ORDER BY ctid"#),
                         Some(id),
                     )
                     .await
@@ -421,7 +428,7 @@ impl InvoiceLineService for InvoiceLines {
         let pool = &self.0.pool;
         self.0
             .cached_list("invoiceline", "all", INVOICE_LINE_TAGS, || async {
-                lines(pool, &format!(r#"{LINE_COLUMNS} ORDER BY "Id""#), None).await
+                lines(pool, &format!(r#"{LINE_COLUMNS} ORDER BY ctid"#), None).await
             })
             .await
     }

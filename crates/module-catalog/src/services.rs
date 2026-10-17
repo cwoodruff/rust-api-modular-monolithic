@@ -4,6 +4,13 @@
 //! repository layer, upstream's "EF Core is the repository" — and caches the
 //! result cache-aside for twenty minutes under upstream's keys and tags. A
 //! lookup that finds nothing is not cached.
+//!
+//! Collections come back in the table's physical order (`ORDER BY ctid`),
+//! because upstream's list queries have no `ORDER BY` and PostgreSQL answers
+//! them in heap order. The seeded tracks are not stored in `Id` order, and an
+//! updated row moves to the end of its table, so ordering by `Id` would answer
+//! differently from the original — the parity harness caught exactly that.
+//! By-id projections keep the explicit order upstream's queries give them.
 
 use std::sync::Arc;
 
@@ -236,7 +243,7 @@ impl AlbumService for Albums {
             .cached_list("album", "all", ALBUM_TAGS, || async {
                 // No Include upstream, so the artist's name stays null here.
                 let rows = sqlx::query_as::<_, AlbumRow>(
-                    r#"SELECT "Id", "Title", "ArtistId" FROM catalog."Album" ORDER BY "Id""#,
+                    r#"SELECT "Id", "Title", "ArtistId" FROM catalog."Album" ORDER BY ctid"#,
                 )
                 .fetch_all(pool)
                 .await?;
@@ -253,7 +260,7 @@ impl AlbumService for Albums {
                 let rows = sqlx::query_as::<_, AlbumRow>(
                     r#"SELECT a."Id", a."Title", a."ArtistId", ar."Name" AS "ArtistName"
                          FROM catalog."Album" a LEFT JOIN catalog."Artist" ar ON ar."Id" = a."ArtistId"
-                        WHERE a."ArtistId" = $1 ORDER BY a."Id""#,
+                        WHERE a."ArtistId" = $1 ORDER BY a.ctid"#,
                 )
                 .bind(id)
                 .fetch_all(pool)
@@ -339,7 +346,7 @@ impl ArtistService for Artists {
         self.0
             .cached_list("artist", "all", ARTIST_TAGS, || async {
                 let rows = sqlx::query_as::<_, NamedRow>(
-                    r#"SELECT "Id", "Name" FROM catalog."Artist" ORDER BY "Id""#,
+                    r#"SELECT "Id", "Name" FROM catalog."Artist" ORDER BY ctid"#,
                 )
                 .fetch_all(pool)
                 .await?;
@@ -389,7 +396,7 @@ impl Tracks {
             .cached_list("track", &discriminator, TRACK_TAGS, || async move {
                 tracks(
                     pool,
-                    &format!(r#"{TRACK_COLUMNS} {clause} ORDER BY t."Id""#),
+                    &format!(r#"{TRACK_COLUMNS} {clause} ORDER BY t.ctid"#),
                     Some(id),
                 )
                 .await
@@ -419,7 +426,7 @@ impl TrackService for Tracks {
         let pool = &self.0.pool;
         self.0
             .cached_list("track", "all", TRACK_TAGS, || async {
-                tracks(pool, &format!(r#"{TRACK_COLUMNS} ORDER BY t."Id""#), None).await
+                tracks(pool, &format!(r#"{TRACK_COLUMNS} ORDER BY t.ctid"#), None).await
             })
             .await
     }
@@ -541,7 +548,7 @@ impl PlaylistService for Playlists {
         self.0
             .cached_list("playlist", "all", PLAYLIST_TAGS, || async {
                 let rows = sqlx::query_as::<_, NamedRow>(
-                    r#"SELECT "Id", "Name" FROM catalog."Playlist" ORDER BY "Id""#,
+                    r#"SELECT "Id", "Name" FROM catalog."Playlist" ORDER BY ctid"#,
                 )
                 .fetch_all(pool)
                 .await?;

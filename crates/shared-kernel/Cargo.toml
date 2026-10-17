@@ -22,6 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+rust_decimal = { workspace = true }
 sqlx = { workspace = true }
 tokio-util = { workspace = true }
 uuid = { workspace = true }
