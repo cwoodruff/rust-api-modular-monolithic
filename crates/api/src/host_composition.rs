@@ -203,7 +203,15 @@ pub async fn build(config: AppConfig, options: HostOptions) -> anyhow::Result<Ho
     {
         db_seeder::migrate_and_seed(services.databases().all(), &options.content_root)
             .await
-            .context("migrating and seeding the database failed")?;
+            .map_err(|error| {
+                let hint = if connection_refused(&error) {
+                    DATABASE_NOT_RUNNING
+                } else {
+                    ""
+                };
+                anyhow::Error::new(error)
+                    .context(format!("migrating and seeding the database failed{hint}"))
+            })?;
     }
 
     let policies = services.policies().unwrap_or_else(|| Arc::new(NoPolicies));
@@ -237,4 +245,47 @@ pub async fn build(config: AppConfig, options: HostOptions) -> anyhow::Result<Ho
         endpoints: descriptors,
         router,
     })
+}
+
+/// Appended to a startup failure when nothing answered on the database's port,
+/// which locally almost always means the compose container is not running.
+const DATABASE_NOT_RUNNING: &str = "; nothing is listening at the database's \
+    address. Is PostgreSQL running? `docker compose up -d` starts the local one on localhost:5432";
+
+/// Whether any cause in `error`'s chain is a refused TCP connection.
+fn connection_refused(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |cause| cause.source()).any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use shared_kernel::DataError;
+
+    use super::connection_refused;
+
+    #[test]
+    fn a_refused_connection_is_found_anywhere_in_the_chain() {
+        let refused = DataError::database(sqlx::Error::Io(io::Error::from(
+            io::ErrorKind::ConnectionRefused,
+        )));
+
+        assert!(connection_refused(&refused));
+    }
+
+    #[test]
+    fn other_failures_get_no_hint() {
+        let timed_out =
+            DataError::database(sqlx::Error::Io(io::Error::from(io::ErrorKind::TimedOut)));
+
+        assert!(!connection_refused(&timed_out));
+        assert!(!connection_refused(&DataError::database(
+            sqlx::Error::PoolTimedOut
+        )));
+    }
 }
