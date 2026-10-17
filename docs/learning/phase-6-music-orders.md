@@ -1,6 +1,6 @@
 # Phase 6 — Music and Orders
 
-*Learning Rust through the port, part 7 of 10.*
+*Learning Rust through the port, part 7 of 11.*
 
 | | |
 |---|---|

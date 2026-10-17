@@ -152,6 +152,28 @@ Each step is one commit on `upgrade/modular-monolith-parity`, with
 8. **Operations and docs.** CI with Postgres, the parity harness pointed at a
    PostgreSQL original, Dockerfile, README, `docs/`, a learning-series entry.
 
+### What actually landed
+
+Steps 2 to 5 landed as one commit, `9763240`. The plan had the kernel and the
+contracts arriving beside the old code, then a switch. In practice the old
+modules could not compile against the new kernel's module contract and
+authorization model, and keeping them building would have meant a second
+persistence layer carried through the transition: the SQLite repositories
+alongside the PostgreSQL pools, both wired into the host. Doing the switch at
+once was the smaller change.
+
+| Commit | Step | What |
+|---|---|---|
+| `ec939b2` | 1 | This plan and the ADRs |
+| `9763240` | 2–5 | Kernel, contracts, the five modules on PostgreSQL with their own schemas, the outbox and both consumers, Reporting, the host; old persistence crates and `chinook.db` deleted |
+| `165dd4b` | 7 | `test-support`: the PostgreSQL fixture and template cloning; the first full-host test |
+| `7c4446c` | 7 | Architecture suites: guardrails, fences, extraction readiness, public surface |
+| `39d8578` | 6 | `samples/catalog-host` and the extraction playbook |
+| `933c4f2` | 7 | `module-tests`: each module on a host of its own |
+
+The full-host suites, the parity harness, CI, the Dockerfile and the
+documentation follow in later commits.
+
 ## 6. Out of scope, as upstream
 
 No module is extracted; no real identity provider; no Redis, no broker; the

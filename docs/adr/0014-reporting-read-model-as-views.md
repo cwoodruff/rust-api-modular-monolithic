@@ -40,19 +40,24 @@ for a module that only reads.
     `reporting` locally);
   - it is one-directional: no module depends on `module-reporting`, and
     Reporting has no contracts crate;
-  - a rename breaks Reporting's tests first: every table and column the
-    views and checks name is listed in one `REFERENCES` table in
-    `module-reporting`, and a test checks each entry against
+  - a rename breaks Reporting's tests first:
+    `module-tests/tests/reporting.rs` reads the view SQL out of Reporting's
+    migration (each `FROM`/`JOIN schema."Table" alias` and `alias."Column"`,
+    as upstream's `ViewColumnReader` does) and checks every column against
     `information_schema` on a database migrated by the owning modules'
-    current migrations. (The original checks against each module's EF model;
-    the migrated schema is the nearest Rust equivalent);
+    current migrations. The original checks against each module's EF model;
+    the migrated schema is the nearest Rust equivalent. `module-reporting`
+    also keeps a `REFERENCES` list of every column the views and orphan
+    checks read, with a unit test that the orphan checks' columns are in it;
   - PostgreSQL also refuses to drop or retype a column a view uses, so a
     breaking change in another module fails its migration loudly rather
     than corrupting reports.
 - Migrations run as the schema owner (`ConnectionStrings:AppDatabase`),
-  never as the reader. The view SQL is versioned in the migration file names
-  (`..._create_sales_by_genre_v1.sql`); changing a view means adding a v2
-  migration that replaces it.
+  never as the reader. The view SQL is versioned by name
+  (`CREATE_SALES_BY_GENRE_V1` and `CREATE_INVOICE_LINES_WITH_NAMES_V1` in
+  `module-reporting/src/sql.rs`, which a unit test checks appear verbatim in
+  the migration); changing a view means adding a V2 and a new migration that
+  replaces it, never editing V1.
 - Report queries scan other modules' tables, so each runs inside Reporting's
   `ModuleGate` (default 4 at a time, ADR-0013) and its rate-limit policy.
 

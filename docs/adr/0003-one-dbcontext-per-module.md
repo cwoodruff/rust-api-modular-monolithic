@@ -21,24 +21,29 @@ set.
 - Catalog, Orders and Administration (and Reporting, from step 5) each own a
   `sqlx::PgPool`, built in `Module::register_services` through
   `shared_kernel::persistence` against the one shared connection string
-  `ConnectionStrings:AppDatabase`. Each pool's connections set `search_path`
-  to the module's schema. The pool is registered with `Services` keyed by the
-  module (ADR-0021) and is held in the module's own state; the host builds no
-  pool and no repository for any module.
+  `ConnectionStrings:AppDatabase`, as a `ModuleDatabase` holding the pool,
+  the schema name and the module's migrator. Queries name their tables
+  schema-qualified (`catalog."Track"`). The database is registered with
+  `Services::add_module_database`, which also adds its `/healthz` check, and
+  is held in the module's own state; the host builds no pool and no
+  repository for any module.
 - Each module crate embeds its migrations with `sqlx::migrate!` from its own
   `migrations/` directory. They run on a connection whose `search_path` is the
-  module's schema, so each schema has its own `_sqlx_migrations` history
-  table: the counterpart of upstream's `<schema>.__EFMigrationsHistory`.
+  module's schema (`ModuleDatabase::migrate` creates the schema, sets
+  `search_path` on that one connection, and runs the migrator), so each
+  schema has its own `_sqlx_migrations` history table: the counterpart of
+  upstream's `<schema>.__EFMigrationsHistory`.
 - Row types, API models, validators and mappers move into their module crate
   as private or `pub(crate)` items. The repository layer is dissolved:
   services query their own pool with `sqlx::query_as`. Services stay behind
   traits so handlers can be tested with fakes.
 - Each module's first migration creates the original's phase 2 schema for
   that module: the original's tables and columns minus the four cross-schema
-  foreign keys (ADR-0004 to ADR-0007). Verified by comparing `pg_dump
-  --schema-only` output with the original's, history tables excepted.
-- In Development and Test the host migrates Administration, Catalog, then
-  Orders, then Reporting (ADR-0014), then loads the seed.
+  foreign keys (ADR-0004 to ADR-0007), copied from the original's EF
+  migrations.
+- In Development, Test and Demo the host's `db_seeder` migrates
+  Administration, Catalog, Orders, then Reporting (ADR-0014), then loads the
+  seed when `catalog."Track"` is empty.
 - `crates/shared-persistence` and `crates/shared-data-sqlite` are deleted.
 
 ## Consistency
@@ -53,8 +58,9 @@ its own ADR.
 - A module cannot query another module's tables through the type system: it
   holds no other module's pool, and module crates do not depend on each other
   (`architecture-tests`, `module_boundaries.rs`). It could still write raw SQL
-  naming another schema on its own pool; the boundary test that scans each
-  module's SQL for other modules' schema names is what catches that.
+  naming another schema on its own pool. Nothing tests for that yet; review
+  is the guard, and Reporting's views are the one place it is done on
+  purpose (ADR-0014).
 - Each module's migrations evolve independently and can be extracted with the
   module.
 - Queries that used to join across modules can no longer do so. Responses

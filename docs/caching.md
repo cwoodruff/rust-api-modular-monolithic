@@ -1,24 +1,50 @@
 # Caching
 
-**Status: implemented, L1 only.** The second tier is not built, which matches
-the original — it defaults to `L1` and ships no `Caching` section at all, so
-the L1 path is the one that actually runs there too.
+**Status: implemented, L1 only, one cache per module.** The second tier is not
+built. The original defaults to `L1` too, and its `appsettings.json` says
+`"Tier": "L1"`, so the L1 path is the one that runs there as well.
+
+## One cache per module
+
+Since the original's bulkhead phase (ADR-0013) each module has a cache of its
+own. A module asks for it in `register_services`:
+
+```rust
+let cache = services.add_module_cache(NAME, DEFAULT_CACHE_SIZE);
+```
+
+That builds a `CacheFacade` holding at most
+`Caching:Modules:<Module>:SizeLimit` entries — every entry counts one —
+falling back to the module's default: Catalog 1000, Orders 1000,
+Administration 500, the same numbers `appsettings.json` sets. Filling one
+module's cache never evicts another's. Reporting and Identity have no cache.
+
+One difference in how a full cache behaves (F19). .NET's `MemoryCache`
+refuses a new entry once its size limit is reached; moka, underneath this
+facade, evicts an old one. Either way the module stays within its share,
+which is what the bulkhead is for, and `module-tests/tests/kernel_cache.rs`
+asserts only that.
+
+Each cache counts on its module's meter: `modmono.cache.hits` and
+`modmono.cache.misses`, tagged `module`. A miss is counted once per caller
+before single flight, as the original counts it, so callers that wait on a
+coalesced load are misses too.
 
 ## The shape
 
 Every read in every service is cache-aside: compose a key, read through the
-cache, fall back to the repository on a miss. Nothing about the HTTP layer
+cache, fall back to the database on a miss. Nothing about the HTTP layer
 caches — there is no output caching, no `ETag`, no `Cache-Control`.
 
 ```rust
-let key = state.cache_keys.compose("music", "album", "v1", &format!("by-id:{id}"));
+let key = self.keys.compose("catalog", "album", "v1", &format!("by-id:{id}"));
 
-state.cache.try_get_or_add(
-    &key,
-    || async { state.repositories.albums.get_by_id(id).await },
-    Some(CacheEntryOptions::for_service(["music:album", "music:album:by-id"])),
-).await
+self.cache
+    .try_get_or_add(&key, load, Some(CacheEntryOptions::for_service(["catalog:album", "catalog:album:by-id"])))
+    .await
 ```
+
+`load` queries the module's own pool; there is no repository between them.
 
 ## Keys
 
@@ -27,7 +53,7 @@ absent partition:
 
 ```
 env : app : module : entity : version : tenant : locale : feature : discriminator
-development:modularmonolith.api:music:album:v1::::by-id:1
+development:modularmonolith.api:catalog:album:v1::::by-id:1
 ```
 
 Two details of the original are preserved because they change what a key *is*:
@@ -41,15 +67,15 @@ Two details of the original are preserved because they change what a key *is*:
   `Development` and `ModularMonolith.Api` everywhere else.
 
 Tenant, locale and feature exist and are never populated: every service calls
-the four-argument form. The caches are global, not per-tenant, despite
-`Caching:Partitioning:TenantAware` existing in the options.
+the four-argument form. The caches are per module, not per tenant.
 
 ## Lifetimes
 
 Twenty minutes, hard-coded in every service, with ±10% jitter so entries
-written together do not expire together. `Caching:DefaultTTLSeconds` (300) and
-the per-module values under `Caching:PerModule` are read into the options and
-then never consulted — in the original as here.
+written together do not expire together. `Caching:DefaultTTLSeconds` (300)
+applies only when a caller passes no lifetime, which none do — in the original
+as here. Track sales and customer purchases are not cached at all: their
+counters move with every event.
 
 ## Invalidation, and the one real divergence
 
@@ -91,7 +117,7 @@ is exact. That only ever reduces duplicate work (F7).
 
 `get_or_add` takes a factory returning `Option<T>`, which cannot distinguish
 "not found" from "the database is down" — a failure would read as an empty
-collection. `try_get_or_add` carries the error out instead, so a repository
+collection. `try_get_or_add` carries the error out instead, so a database
 failure becomes a 500 the way an unhandled exception does in the original.
 Nothing is cached when the factory fails, and `None` is never cached either: a
 404 must not pin a negative result for twenty minutes.
@@ -107,18 +133,16 @@ outage read as *missing data* for every concurrent request but one.
 
 ## Configuration
 
-The full `Caching` section binds, including the members nothing reads, so an
-existing configuration file carries over unchanged. Defaults, which are what
-actually run:
+The original slimmed `CacheOptions` in its bulkhead phase, and so did this
+port: the members nothing read (`SWR`, `Stampede`, `Partitioning`,
+`PerModule`, `Redis`) are gone.
 
 | Key | Default | Read? |
 |---|---|---|
 | `Caching:Enabled` | `true` | yes |
-| `Caching:Tier` | `L1` | yes |
+| `Caching:Tier` | `L1` | yes; `L1L2` is recognized and has no second tier to use |
 | `Caching:Provider` | `InMemory` | no |
 | `Caching:DefaultTTLSeconds` | `300` | only when a caller passes no lifetime, which none do |
-| `Caching:SWR:*` | off | no |
-| `Caching:Stampede:SingleFlight` | `true` | no — single flight is unconditional |
-| `Caching:Partitioning:*` | off | no |
-| `Caching:PerModule:*` | unset | no |
-| `Caching:Redis:*` | — | no |
+| `Caching:Modules:Catalog:SizeLimit` | `1000` | yes |
+| `Caching:Modules:Orders:SizeLimit` | `1000` | yes |
+| `Caching:Modules:Administration:SizeLimit` | `500` | yes |

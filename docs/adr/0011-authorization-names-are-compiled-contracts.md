@@ -9,19 +9,19 @@ Ports upstream ADR-0011.
 ## Context
 
 Identity decides what each authorization policy means; every other module
-applies policies to its endpoints. Before the upgrade the port kept the
-names in `shared_kernel::auth::policies` (`MUSIC_READ`, `ORDERS_READ`,
-`ADMINISTRATION_READ`, ...) and wrapped each route's requirements in a marker
-type (`guards::MusicRead`, `guards::OrdersRead`, ...) whose
-`Policy::REQUIREMENTS` list a handler named through the `Authorized<P>`
-extractor. Identity's vocabulary therefore lived in the shared kernel, not in
-Identity, and the Music-to-Catalog rename changes every one of those names.
-The original had the same problem as string literals: a rename on one side
-compiled and failed at runtime as a 403 on the other.
+applies policies to its endpoints. The original referenced the policies as
+string literals owned by Identity, and a rename on one side compiled and
+failed at runtime as a 403 on the other: the Music-to-Catalog rename drifted
+for one commit before integration tests caught it.
 
-From step 2 the port applies policies by name and evaluates them at request
-time instead of encoding them as types (ADR-0021). That makes the name itself
-the contract, so it needs one definition, owned by Identity.
+Before the upgrade this port kept the names in `shared_kernel::auth::policies`
+and wrapped each route's requirements in a marker type that handlers named
+through an `Authorized<P>` extractor. That vocabulary lived in the shared
+kernel rather than in Identity. The upgrade replaced it: endpoints now list
+policy names, and the evaluator Identity registers decides each name at
+request time (ADR-0021). The marker types and `Authorized<P>` are gone. That
+makes the name itself the contract, so it needs one definition, owned by
+Identity.
 
 ## Decision
 
@@ -31,7 +31,10 @@ the contract, so it needs one definition, owned by Identity.
   `permissions::CATALOG_READ = "catalog.read"`), and module `policies`, with
   `policies::ADMIN` (`role.admin`) and `policies::TENANT_SCOPED`
   (`tenant.scoped`). The strings are the original's.
-- Identity's `PolicyEvaluator` recognizes exactly these names. Every other
+- Identity's `PolicyRegistry`, its `PolicyEvaluator`, recognizes exactly
+  these names. The arrays `permissions::ALL` and `policies::ALL` list them,
+  and the registry, `catalog-host`'s copy and `test-support`'s copy all read
+  those arrays. Every other
   module depends on `identity-contracts` and applies policies only through
   them: `.require_authorization(&[permissions::CATALOG_READ,
   policies::TENANT_SCOPED])` on the endpoint builder. No string literal

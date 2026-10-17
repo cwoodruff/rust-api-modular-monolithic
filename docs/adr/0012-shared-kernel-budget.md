@@ -16,40 +16,41 @@ logic turns a contract into a shared library.
 
 ## Decision
 
-- `shared-kernel` has a budget for its public surface: the number of `pub`
-  items reachable from the crate root (types, traits, functions, constants
-  and re-exports, counted by the test from the crate's sources). The fence
-  test in `architecture-tests` (`fences.rs`) enforces it, and the number is
-  set in that test: the number in `fences.rs`. It is set from the count once
-  steps 2 to 4 have landed, with the same small headroom the original gave
-  itself. Raising it means editing the test, which a reviewer sees in the
-  diff. The original's number (30 public types) is not copied, because a
-  Rust crate's public items do not correspond one to one with .NET public
-  types.
-- `shared-kernel` depends on no module crate, no contracts crate and no
-  validation library (`fences.rs`, checked against `cargo metadata`).
-  Validation is the `RequestValidator<T>` trait; modules implement it
-  themselves.
-- **sqlx exception.** The original confined Npgsql to one namespace,
-  `SharedKernel.Persistence`. Here `sqlx` with the `postgres` feature is
-  allowed in `shared_kernel::persistence` (pool construction, per-schema
-  migrations, the data health probe) and in `shared_kernel::events`, because
-  `EventPublisher::publish` and `inbox_guard::run` take the caller's
-  `sqlx::Transaction<'_, Postgres>`. The original's publisher takes a
-  `DbContext`, an EF type rather than an Npgsql one, so it did not need the
-  second module. No other kernel module names a `sqlx` item; `fences.rs`
-  checks the sources. The outbox and inbox SQL (`FOR UPDATE SKIP LOCKED`,
+- `shared-kernel` has a budget for its public types: every `pub struct`,
+  `pub enum`, `pub trait` and `pub type` in its sources outside test
+  modules. The fence test in `architecture-tests` (`fences.rs`,
+  `KERNEL_PUBLIC_TYPE_BUDGET`) enforces it. The number was set when the
+  upgrade landed: the count then, 74, plus two, the same headroom the
+  original gave itself. Raising it means editing the test, which a reviewer
+  sees in the diff. The original's 30 is not copied: a Rust crate exposes
+  error enums, option structs and trait-object aliases as types where .NET
+  would use exceptions, records and generics.
+- `shared-kernel` depends on no other workspace crate: no module, no
+  contracts crate, and not `validation-rules`, the FluentValidation
+  counterpart modules use (`module_boundaries.rs`, checked against `cargo
+  metadata`). Validation reaches the kernel only as the `RequestValidator<T>`
+  trait.
+- **The driver stays in one file.** The original confined Npgsql to
+  `SharedKernel.Persistence`. Here the PostgreSQL driver's own names
+  (`sqlx::postgres`, `PgPool`, `PgConnection`, `PgRow`, `Postgres`) appear in
+  `shared_kernel/src/persistence.rs` and nowhere else in the kernel; that
+  file exports the aliases `DbPool`, `DbConnection`, `DbTransaction` and
+  `DbRow`, and the outbox, inbox and health checks use those. `fences.rs`
+  scans the sources. Generic sqlx items (`sqlx::query`, `sqlx::Row`) are
+  used in `events` too; the outbox and inbox SQL (`FOR UPDATE SKIP LOCKED`,
   `ON CONFLICT DO NOTHING`) is PostgreSQL dialect either way.
 - Contracts crates (`identity-contracts`, `orders-contracts`,
-  `catalog-contracts`, `administration-contracts`) contain only traits,
-  enums, plain structs with derived impls, and `pub const` items. They have
-  no hand-written `impl` blocks with methods and depend on nothing but
-  `serde` and the value crates their fields use (`fences.rs`).
-- Anything a module registers with `Services` that other modules also
-  register (today the event `Subscription`) carries the module's key, its
-  schema name. A dispatcher runs only the subscriptions under its own key,
-  nothing looks them up without a key, and one module's key yields only that
-  module's handlers (guardrail test in `architecture-tests`).
+  `catalog-contracts`, `administration-contracts`) contain constants, data
+  types with derived impls, and the `IntegrationEvent` accessors an event
+  needs. Any other function, and any `static`, fails `fences.rs`; so does a
+  `pub(crate)` item, the counterpart of upstream's "no InternalsVisibleTo".
+  They depend on nothing in the workspace but `shared-kernel`.
+- Event subscriptions are registered under the module that owns the handler
+  (`Services::add_integration_event_handler(module_key, handler)`). A
+  dispatcher hands an event to every subscription for its type and runs each
+  handler in the inbox of that subscription's own module; a module's key
+  yields only that module's handlers, and no subscription is unkeyed
+  (guardrail test in `architecture-tests`).
 
 ## Consistency
 
@@ -59,12 +60,12 @@ Not a boundary decision.
 
 - Growth of the kernel is visible and deliberate.
 - The headroom in `fences.rs` is all that fits before the next conversation.
-- The sqlx exception covers two kernel modules, not one, and has to be
-  defended in review if it grows beyond them. Changing the database engine
-  touches both.
-- The count is of source-level `pub` items, so a `pub use` re-export counts
-  as an item. That is deliberate: a re-export is surface a module can depend
-  on.
+- Changing the database engine means rewriting `persistence.rs` and the
+  dialect-specific SQL in `events`; the type names in the rest of the kernel
+  do not change.
+- The count is of declared types; re-exports and functions are not counted,
+  so the budget limits how many concepts the kernel defines rather than how
+  many entry points it has.
 - The original's amendments (deleting unused caching option classes,
   flattening `RateLimitPolicyRegistry.Names`, adding `ModuleJson`, marking
   assemblies `IsAotCompatible`) describe .NET type shuffles with no Rust
@@ -73,7 +74,7 @@ Not a boundary decision.
 
 ## How to reverse
 
-Delete the budget and dependency tests in `fences.rs`. To remove the sqlx
-exception instead, move `shared_kernel::persistence` and the transactional
-parts of `shared_kernel::events` into a separate crate depended on by the
-modules and the host.
+Delete the budget and driver tests in `fences.rs` and the kernel rows in
+`module_boundaries.rs`. To take the driver out of the kernel entirely, move
+`persistence` and `events` into a separate crate depended on by the modules
+and the host.
