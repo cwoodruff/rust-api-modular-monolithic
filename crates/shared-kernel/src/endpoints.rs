@@ -23,7 +23,8 @@
 //!
 //! Upstream's rule, which `EndpointFilterTests` checks: a group's filters run
 //! before an endpoint's own, and filters on one builder run in the order they
-//! were added. Here, outermost first: the group's rate limit, authorization,
+//! were added. Here, outermost first: route constraints, the group's rate
+//! limit, authorization,
 //! the group's filters in order, the endpoint's filters in order, then the
 //! handler — whose extractors, [`Validated`](crate::validation::Validated)
 //! among them, run last.
@@ -485,6 +486,17 @@ impl<S> Drop for RouteGroup<'_, S> {
                     }));
             }
 
+            // The group's rate limit sits outside authorization, as
+            // `UseRateLimiter` runs before `UseAuthorization`, but inside the
+            // route constraints: a value a constraint rejects means no route
+            // matched upstream, so the limiter never ran for it.
+            if let Some(limiter) = self.rate_limiter.clone() {
+                router =
+                    router.route_layer(middleware::from_fn(move |request: Request, next: Next| {
+                        traffic_control::rate_limit(limiter.clone(), request, next)
+                    }));
+            }
+
             let (axum_path, constraints) = parse_route(&path);
             if !constraints.is_empty() {
                 let constraints: Arc<[(String, Constraint)]> = constraints.into();
@@ -494,11 +506,14 @@ impl<S> Drop for RouteGroup<'_, S> {
                     }));
             }
 
+            // ASP.NET routing treats a trailing slash as optional on every
+            // route, written with one or not, so each answers both ways.
             let trimmed = axum_path.trim_end_matches('/');
-            let canonical = if trimmed.is_empty() { "/" } else { trimmed };
-            group = group.route(canonical, router.clone());
-            if axum_path.len() > 1 && axum_path.ends_with('/') {
-                group = group.route(&axum_path, router);
+            if trimmed.is_empty() {
+                group = group.route("/", router);
+            } else {
+                group = group.route(trimmed, router.clone());
+                group = group.route(&format!("{trimmed}/"), router);
             }
 
             self.endpoints.descriptors.push(EndpointDescriptor {
@@ -513,12 +528,6 @@ impl<S> Drop for RouteGroup<'_, S> {
                 responses: conventions.responses,
                 validates: conventions.validates,
             });
-        }
-
-        if let Some(limiter) = self.rate_limiter.clone() {
-            group = group.layer(middleware::from_fn(move |request: Request, next: Next| {
-                traffic_control::rate_limit(limiter.clone(), request, next)
-            }));
         }
 
         let router = std::mem::take(&mut self.endpoints.router);

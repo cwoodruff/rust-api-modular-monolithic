@@ -513,6 +513,22 @@ fn merge_layer(base: &mut Value, layer: Value) {
                 }
             }
         }
+        // A sparse index map — `Identity__InMemoryUsers__1__Password` alone —
+        // addresses elements of the array below it, as .NET's flattened keys
+        // do, rather than replacing the array.
+        (Value::Array(base), Value::Object(layer))
+            if !layer.is_empty() && layer.keys().all(|key| key.parse::<usize>().is_ok()) =>
+        {
+            for (key, value) in layer {
+                let Ok(index) = key.parse::<usize>() else {
+                    continue;
+                };
+                if index >= base.len() {
+                    base.resize(index + 1, Value::Null);
+                }
+                merge_layer(&mut base[index], value);
+            }
+        }
         (base, layer) => *base = layer,
     }
 }
@@ -798,5 +814,29 @@ mod tests {
             .expect("absent appsettings files should load as an empty configuration");
 
         assert_eq!(config.service_name(), "ModularMonolith.Api");
+    }
+
+    #[test]
+    fn a_variable_naming_one_element_of_an_array_changes_only_that_element() {
+        let mut base = json!({ "identity": { "inmemoryusers": [
+            { "username": "first", "password": "one" },
+            { "username": "second", "password": "two" }
+        ] } });
+        let layer = environment_layer(
+            [(
+                "Identity__InMemoryUsers__1__Password".to_owned(),
+                "override".to_owned(),
+            )]
+            .into_iter(),
+        );
+
+        merge_layer(&mut base, layer);
+
+        let users = &base["identity"]["inmemoryusers"];
+        assert_eq!(users[0], json!({ "username": "first", "password": "one" }));
+        assert_eq!(
+            users[1],
+            json!({ "username": "second", "password": "override" })
+        );
     }
 }

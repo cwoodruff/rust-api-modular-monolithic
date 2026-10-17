@@ -331,3 +331,30 @@ async fn an_unreachable_database_is_unhealthy_on_healthz_and_degraded_on_data_he
     assert_eq!(data.json()["status"], "Degraded");
     assert_eq!(data.json()["database"]["connected"], false);
 }
+
+/// ASP.NET treats a trailing slash as optional on every route, whichever way
+/// the route was written: `"genres/"` and `"/genres"` both answer both ways.
+#[tokio::test]
+async fn every_route_answers_with_and_without_a_trailing_slash() {
+    let host = crate::common::host().await;
+    let token = host.token("admin").await;
+
+    for path in [
+        "/api/catalog/tracks/1/",
+        "/api/catalog/albums",
+        "/api/catalog/albums/",
+        "/api/admin/genres/1/",
+    ] {
+        let response = host.send(TestRequest::get(path).bearer(&token)).await;
+        assert_eq!(response.status, 200, "GET {path}");
+    }
+
+    let created = host
+        .send(
+            TestRequest::post("/api/admin/genres/")
+                .bearer(&token)
+                .json(&serde_json::json!({ "Name": "Slashed" })),
+        )
+        .await;
+    assert_eq!(created.status, 201, "POST with a trailing slash");
+}

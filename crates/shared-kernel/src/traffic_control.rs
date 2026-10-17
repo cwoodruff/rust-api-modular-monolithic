@@ -11,7 +11,6 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, Request};
@@ -177,7 +176,6 @@ pub struct RateLimiter {
     name: &'static str,
     options: RateLimitOptions,
     windows: Arc<DashMap<String, Window>>,
-    queued: Arc<AtomicU32>,
     last_sweep: Arc<std::sync::Mutex<Option<Instant>>>,
 }
 
@@ -185,6 +183,8 @@ pub struct RateLimiter {
 struct Window {
     started: Instant,
     used: u32,
+    /// Requests waiting for a later window, which go before new arrivals.
+    queued: u32,
 }
 
 impl RateLimiter {
@@ -195,7 +195,6 @@ impl RateLimiter {
             name,
             options,
             windows: Arc::new(DashMap::new()),
-            queued: Arc::new(AtomicU32::new(0)),
             last_sweep: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -219,17 +218,27 @@ impl RateLimiter {
     }
 
     /// Records a request against `partition`, reporting whether it is allowed now.
+    #[cfg(test)]
     fn try_acquire(&self, partition: &str) -> bool {
-        self.try_acquire_at(partition, Instant::now()).is_ok()
+        matches!(
+            self.admit(partition, Instant::now(), Arrival::New),
+            Admission::Admitted
+        )
     }
 
-    /// `Ok` when allowed; otherwise when the partition's window ends.
-    fn try_acquire_at(&self, partition: &str, now: Instant) -> Result<(), Instant> {
+    /// Decides one request against its partition's window.
+    ///
+    /// Port of a .NET `FixedWindowRateLimiter` per partition with
+    /// `QueueProcessingOrder.OldestFirst`: the queue belongs to the partition,
+    /// and requests already waiting are admitted before new ones, so a new
+    /// arrival gets a permit only if the waiters leave one.
+    fn admit(&self, partition: &str, now: Instant, arrival: Arrival) -> Admission {
         self.sweep_if_due(now);
 
         let mut entry = self.windows.entry(partition.to_owned()).or_insert(Window {
             started: now,
             used: 0,
+            queued: 0,
         });
 
         if now.duration_since(entry.started) >= self.options.window {
@@ -237,33 +246,46 @@ impl RateLimiter {
             entry.used = 0;
         }
 
-        if entry.used >= self.options.permit_limit {
-            return Err(entry.started + self.options.window);
+        let reopens = entry.started + self.options.window;
+        let waiting_ahead = match arrival {
+            Arrival::New => entry.queued,
+            Arrival::Queued => 0,
+        };
+
+        if entry.used + waiting_ahead < self.options.permit_limit {
+            entry.used += 1;
+            if arrival == Arrival::Queued {
+                entry.queued = entry.queued.saturating_sub(1);
+            }
+            return Admission::Admitted;
         }
 
-        entry.used += 1;
-        Ok(())
+        match arrival {
+            Arrival::Queued => Admission::Wait(reopens),
+            Arrival::New if entry.queued < self.options.queue_limit => {
+                entry.queued += 1;
+                Admission::Wait(reopens)
+            }
+            Arrival::New => Admission::Refused,
+        }
     }
 
-    /// Admits a request now, after queueing for the next window, or not at all.
+    /// Admits a request now, after queueing for a later window, or not at all.
     ///
     /// With `QueueLimit` zero — every policy upstream configures — a request
     /// over the limit is refused at once.
     pub async fn acquire(&self, partition: &str) -> bool {
-        let reopens = match self.try_acquire_at(partition, Instant::now()) {
-            Ok(()) => return true,
-            Err(reopens) => reopens,
-        };
-
-        if self.queued.fetch_add(1, Ordering::SeqCst) >= self.options.queue_limit {
-            self.queued.fetch_sub(1, Ordering::SeqCst);
-            return false;
+        let mut arrival = Arrival::New;
+        loop {
+            match self.admit(partition, Instant::now(), arrival) {
+                Admission::Admitted => return true,
+                Admission::Refused => return false,
+                Admission::Wait(reopens) => {
+                    tokio::time::sleep_until(reopens.into()).await;
+                    arrival = Arrival::Queued;
+                }
+            }
         }
-
-        tokio::time::sleep_until(reopens.into()).await;
-        let admitted = self.try_acquire(partition);
-        self.queued.fetch_sub(1, Ordering::SeqCst);
-        admitted
     }
 
     /// Drops every partition whose window has already closed, returning how many.
@@ -273,8 +295,11 @@ impl RateLimiter {
 
     fn sweep_closed_windows_as_of(&self, now: Instant) -> usize {
         let before = self.windows.len();
-        self.windows
-            .retain(|_, window| now.duration_since(window.started) < self.options.window);
+        // A partition with requests still queued is never closed: its waiters
+        // hold their place in it.
+        self.windows.retain(|_, window| {
+            window.queued > 0 || now.duration_since(window.started) < self.options.window
+        });
         before.saturating_sub(self.windows.len())
     }
 
@@ -298,6 +323,19 @@ impl RateLimiter {
     pub fn tracked_partitions(&self) -> usize {
         self.windows.len()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arrival {
+    New,
+    Queued,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    Admitted,
+    Wait(Instant),
+    Refused,
 }
 
 /// Applies a policy to a route group, rejecting with a bare 429.
@@ -550,6 +588,49 @@ mod tests {
             !limiter.try_acquire("ip:198.51.100.1"),
             "the allowance must have survived the sweep"
         );
+    }
+
+    #[tokio::test]
+    async fn one_partitions_queue_never_takes_anothers_slot() {
+        let limiter = RateLimiter::new(
+            "test",
+            RateLimitOptions {
+                permit_limit: 1,
+                window: Duration::from_millis(30),
+                queue_limit: 1,
+            },
+        );
+
+        assert!(limiter.try_acquire("ip:198.51.100.1"));
+        assert!(limiter.try_acquire("ip:198.51.100.2"));
+        let (first, second) = tokio::join!(
+            limiter.acquire("ip:198.51.100.1"),
+            limiter.acquire("ip:198.51.100.2")
+        );
+        assert!(first && second, "each partition has a queue of its own");
+    }
+
+    #[tokio::test]
+    async fn a_waiter_goes_before_a_new_arrival() {
+        let limiter = RateLimiter::new(
+            "test",
+            RateLimitOptions {
+                permit_limit: 1,
+                window: Duration::from_millis(30),
+                queue_limit: 1,
+            },
+        );
+
+        assert!(limiter.try_acquire("ip:198.51.100.1"));
+        let waiter = limiter.acquire("ip:198.51.100.1");
+        let late = async {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            limiter.try_acquire("ip:198.51.100.1")
+        };
+        let (waited, late) = tokio::join!(waiter, late);
+
+        assert!(waited, "the queued request gets the reopened window");
+        assert!(!late, "and the newcomer does not jump it");
     }
 
     #[tokio::test]

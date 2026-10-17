@@ -370,14 +370,29 @@ pub fn parse_connection_string(value: &str) -> Result<PgConnectOptions, String> 
             "database" | "initialcatalog" => options.database(raw),
             "username" | "user" | "userid" | "uid" => options.username(raw),
             "password" | "pwd" => options.password(raw),
+            // Npgsql spells two modes without the hyphen libpq uses.
             "sslmode" => options.ssl_mode(
-                PgSslMode::from_str(&raw.to_ascii_lowercase())
-                    .map_err(|error| error.to_string())?,
+                PgSslMode::from_str(&match raw.to_ascii_lowercase().as_str() {
+                    "verifyca" => "verify-ca".to_owned(),
+                    "verifyfull" => "verify-full".to_owned(),
+                    other => other.to_owned(),
+                })
+                .map_err(|error| error.to_string())?,
             ),
             "applicationname" => options.application_name(raw),
             // Npgsql pooling and timeout keys: the pool is configured separately.
-            "pooling" | "maxpoolsize" | "maximumpoolsize" | "minpoolsize" | "minimumpoolsize"
-            | "timeout" | "commandtimeout" | "includeerrordetail" => options,
+            "pooling"
+            | "maxpoolsize"
+            | "maximumpoolsize"
+            | "minpoolsize"
+            | "minimumpoolsize"
+            | "timeout"
+            | "commandtimeout"
+            | "includeerrordetail"
+            | "trustservercertificate"
+            | "keepalive"
+            | "connectionidlelifetime"
+            | "connectionlifetime" => options,
             other => return Err(format!("unsupported key '{other}'")),
         };
     }
@@ -402,6 +417,15 @@ mod tests {
         assert_eq!(options.get_port(), 6543);
         assert_eq!(options.get_database(), Some("chinook"));
         assert_eq!(options.get_username(), "reporting");
+    }
+
+    #[test]
+    fn npgsqls_ssl_mode_spellings_are_understood() {
+        let options =
+            parse_connection_string("Host=x;SSL Mode=VerifyFull;Trust Server Certificate=true")
+                .unwrap();
+
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
     }
 
     #[test]
