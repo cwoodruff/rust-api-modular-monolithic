@@ -31,19 +31,32 @@ fn list(headers: &HeaderMap, name: &str) -> Vec<String> {
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(',').map(str::trim).filter(|item| !item.is_empty()).map(ToOwned::to_owned).collect())
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 impl Authenticator for HeaderAuthenticator {
-    fn authenticate<'a>(&'a self, headers: &'a HeaderMap) -> BoxFuture<'a, Option<AuthenticatedUser>> {
+    fn authenticate<'a>(
+        &'a self,
+        headers: &'a HeaderMap,
+    ) -> BoxFuture<'a, Option<AuthenticatedUser>> {
         Box::pin(async move {
             let subject = headers.get("X-Test-User")?.to_str().ok()?.to_owned();
             Some(AuthenticatedUser {
                 name: Some(subject.clone()),
                 subject,
                 email: None,
-                tenant: headers.get("X-Test-Tenant").and_then(|value| value.to_str().ok()).map(ToOwned::to_owned),
+                tenant: headers
+                    .get("X-Test-Tenant")
+                    .and_then(|value| value.to_str().ok())
+                    .map(ToOwned::to_owned),
                 roles: list(headers, "X-Test-Roles"),
                 permissions: list(headers, "X-Test-Permissions"),
             })
@@ -73,7 +86,11 @@ impl PolicyEvaluator for TestPolicies {
         } else {
             return PolicyDecision::Unknown;
         };
-        if allowed { PolicyDecision::Allowed } else { PolicyDecision::Denied }
+        if allowed {
+            PolicyDecision::Allowed
+        } else {
+            PolicyDecision::Denied
+        }
     }
 }
 

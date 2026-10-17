@@ -47,6 +47,7 @@ static SERVER: OnceLock<PostgresServer> = OnceLock::new();
 static CONTAINER: OnceLock<testcontainers::Container<Postgres>> = OnceLock::new();
 static CLONE_LOCK: Mutex<()> = Mutex::const_new(());
 static TEMPLATES: Mutex<Option<HashSet<String>>> = Mutex::const_new(None);
+static ROLES: Mutex<bool> = Mutex::const_new(false);
 
 /// The server, started on first use.
 ///
@@ -82,8 +83,13 @@ pub fn server() -> &'static PostgresServer {
             // Both lookups block on the runner's own runtime, so they run here
             // too, and the container is parked in a static that is never
             // dropped: the reaper removes it when the process exits.
-            let host = container.get_host().expect("the container should have a host").to_string();
-            let port = container.get_host_port_ipv4(5432).expect("the container should publish 5432");
+            let host = container
+                .get_host()
+                .expect("the container should have a host")
+                .to_string();
+            let port = container
+                .get_host_port_ipv4(5432)
+                .expect("the container should publish 5432");
             let _ = CONTAINER.set(container);
             (host, port)
         })
@@ -101,7 +107,9 @@ pub fn server() -> &'static PostgresServer {
 
 impl PostgresServer {
     fn from_url(url: &str) -> Self {
-        let options: sqlx::postgres::PgConnectOptions = url.parse().expect("TEST_POSTGRES_URL should be a postgres:// URL");
+        let options: sqlx::postgres::PgConnectOptions = url
+            .parse()
+            .expect("TEST_POSTGRES_URL should be a postgres:// URL");
         let password = url
             .split_once("://")
             .and_then(|(_, rest)| rest.split_once('@'))
@@ -136,7 +144,10 @@ impl PostgresServer {
     }
 
     fn url(&self, database: &str) -> String {
-        format!("postgres://{}:{}@{}:{}/{database}", self.user, self.password, self.host, self.port)
+        format!(
+            "postgres://{}:{}@{}:{}/{database}",
+            self.user, self.password, self.host, self.port
+        )
     }
 
     /// Opens one connection to `database` as the superuser.
@@ -145,12 +156,17 @@ impl PostgresServer {
     ///
     /// When the server refuses.
     pub async fn connect(&self, database: &str) -> PgConnection {
-        PgConnection::connect(&self.url(database)).await.expect("the test server should accept a connection")
+        PgConnection::connect(&self.url(database))
+            .await
+            .expect("the test server should accept a connection")
     }
 
     async fn admin(&self, statement: &str) {
         let mut connection = self.connect("postgres").await;
-        sqlx::raw_sql(statement).execute(&mut connection).await.unwrap_or_else(|error| panic!("{statement}: {error}"));
+        sqlx::raw_sql(statement)
+            .execute(&mut connection)
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
         let _ = connection.close().await;
     }
 
@@ -158,6 +174,12 @@ impl PostgresServer {
     /// `reporting_reader` role Reporting's migration grants to, and the
     /// `reporting` login in it. Roles are server-wide, so once is enough.
     async fn ensure_roles(&self) {
+        // Once per process, and never two at once: concurrent `CREATE ROLE`s
+        // race on pg_authid's unique index even behind `IF NOT EXISTS`.
+        let mut created = ROLES.lock().await;
+        if *created {
+            return;
+        }
         self.admin(&format!(
             "DO $$ BEGIN
                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'reporting_reader') THEN
@@ -169,6 +191,7 @@ impl PostgresServer {
              END $$;"
         ))
         .await;
+        *created = true;
     }
 
     /// The template named `name`, built by `build` the first time any test in
@@ -190,8 +213,12 @@ impl PostgresServer {
         }
 
         self.ensure_roles().await;
-        self.admin(&format!(r#"DROP DATABASE IF EXISTS "{database}" WITH (FORCE)"#)).await;
-        self.admin(&format!(r#"CREATE DATABASE "{database}""#)).await;
+        self.admin(&format!(
+            r#"DROP DATABASE IF EXISTS "{database}" WITH (FORCE)"#
+        ))
+        .await;
+        self.admin(&format!(r#"CREATE DATABASE "{database}""#))
+            .await;
         build(database.clone()).await;
 
         built.insert(database.clone());
@@ -202,7 +229,10 @@ impl PostgresServer {
     pub async fn clone_of(&self, template: &str) -> String {
         let database = format!("test_{}", uuid::Uuid::new_v4().simple());
         let _serialized = CLONE_LOCK.lock().await;
-        self.admin(&format!(r#"CREATE DATABASE "{database}" TEMPLATE "{template}" STRATEGY FILE_COPY"#)).await;
+        self.admin(&format!(
+            r#"CREATE DATABASE "{database}" TEMPLATE "{template}" STRATEGY FILE_COPY"#
+        ))
+        .await;
         database
     }
 
@@ -210,7 +240,8 @@ impl PostgresServer {
     pub async fn empty(&self) -> String {
         self.ensure_roles().await;
         let database = format!("empty_{}", uuid::Uuid::new_v4().simple());
-        self.admin(&format!(r#"CREATE DATABASE "{database}""#)).await;
+        self.admin(&format!(r#"CREATE DATABASE "{database}""#))
+            .await;
         database
     }
 }

@@ -27,7 +27,9 @@ pub fn content_root() -> PathBuf {
         if current.join("appsettings.json").is_file() {
             return current.to_path_buf();
         }
-        current = current.parent().expect("appsettings.json should be at the repository root");
+        current = current
+            .parent()
+            .expect("appsettings.json should be at the repository root");
     }
 }
 

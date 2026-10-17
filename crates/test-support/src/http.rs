@@ -25,7 +25,8 @@ impl TestResponse {
     /// When it is not JSON.
     #[must_use]
     pub fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|error| panic!("expected JSON, got {:?}: {error}", self.text()))
+        serde_json::from_slice(&self.body)
+            .unwrap_or_else(|error| panic!("expected JSON, got {:?}: {error}", self.text()))
     }
 
     /// The body as text.
@@ -37,7 +38,10 @@ impl TestResponse {
     /// One header's value.
     #[must_use]
     pub fn header(&self, name: &str) -> Option<String> {
-        self.headers.get(name).and_then(|value| value.to_str().ok()).map(ToOwned::to_owned)
+        self.headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned)
     }
 }
 
@@ -139,11 +143,21 @@ impl TestRequest {
             None => Body::empty(),
         };
 
-        let response = router.clone().oneshot(builder.body(body).unwrap()).await.unwrap();
+        let response = router
+            .clone()
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap();
         let status = response.status();
         let headers = response.headers().clone();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
 
-        TestResponse { status, headers, body }
+        TestResponse {
+            status,
+            headers,
+            body,
+        }
     }
 }
