@@ -1,6 +1,6 @@
 [package]
 name = "architecture-tests"
-description = "Port of ModularMonolith.Architecture.Tests: enforces the crate dependency graph."
+description = "Port of ModularMonolith.Architecture.Tests: the dependency graph, the guardrails on mapped endpoints, and the fences on the kernel and contracts."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,5 +11,13 @@ publish = false
 [lints]
 workspace = true
 
-[dev-dependencies]
+[dependencies]
 serde_json = { workspace = true }
+
+[dev-dependencies]
+api = { workspace = true }
+identity-contracts = { workspace = true }
+module-identity = { workspace = true }
+shared-kernel = { workspace = true }
+test-support = { workspace = true }
+tokio = { workspace = true }
