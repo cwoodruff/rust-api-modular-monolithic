@@ -15,9 +15,17 @@ fn set(names: &[&str]) -> BTreeSet<String> {
 fn catalog_references_only_the_kernel_and_contracts() {
     let graph = workspace_dependency_graph();
     let catalog = &graph["module-catalog"];
-    let allowed = set(&["shared-kernel", "catalog-contracts", "orders-contracts", "identity-contracts"]);
+    let allowed = set(&[
+        "shared-kernel",
+        "catalog-contracts",
+        "orders-contracts",
+        "identity-contracts",
+    ]);
 
-    assert!(catalog.is_subset(&allowed), "module-catalog depends on {catalog:?}");
+    assert!(
+        catalog.is_subset(&allowed),
+        "module-catalog depends on {catalog:?}"
+    );
     assert!(catalog.contains("shared-kernel") && catalog.contains("orders-contracts"));
 }
 
@@ -26,8 +34,16 @@ fn catalog_references_only_the_kernel_and_contracts() {
 fn the_contracts_catalog_uses_reference_only_the_kernel() {
     let graph = workspace_dependency_graph();
 
-    for contracts in ["catalog-contracts", "orders-contracts", "identity-contracts"] {
-        assert!(graph[contracts].is_subset(&set(&["shared-kernel"])), "{contracts} depends on {:?}", graph[contracts]);
+    for contracts in [
+        "catalog-contracts",
+        "orders-contracts",
+        "identity-contracts",
+    ] {
+        assert!(
+            graph[contracts].is_subset(&set(&["shared-kernel"])),
+            "{contracts} depends on {:?}",
+            graph[contracts]
+        );
     }
 }
 
@@ -44,7 +60,12 @@ fn the_catalog_host_references_only_catalog_the_kernel_and_their_contracts() {
     };
 
     assert!(
-        sample.is_subset(&set(&["module-catalog", "shared-kernel", "identity-contracts", "orders-contracts"])),
+        sample.is_subset(&set(&[
+            "module-catalog",
+            "shared-kernel",
+            "identity-contracts",
+            "orders-contracts"
+        ])),
         "catalog-host depends on {sample:?}"
     );
     assert!(sample.contains("module-catalog") && sample.contains("shared-kernel"));
@@ -54,10 +75,21 @@ fn the_catalog_host_references_only_catalog_the_kernel_and_their_contracts() {
 /// application. Only the sample fetches JWKS; only tests start containers.
 #[test]
 fn the_host_and_modules_pull_in_no_http_client_or_container_runner() {
-    for name in ["api", "shared-kernel", "module-admin", "module-catalog", "module-identity", "module-orders", "module-reporting"] {
+    for name in [
+        "api",
+        "shared-kernel",
+        "module-admin",
+        "module-catalog",
+        "module-identity",
+        "module-orders",
+        "module-reporting",
+    ] {
         let dependencies = architecture_tests::direct_dependencies(name);
         for forbidden in ["reqwest", "testcontainers", "testcontainers-modules"] {
-            assert!(!dependencies.contains(forbidden), "{name} depends on {forbidden}");
+            assert!(
+                !dependencies.contains(forbidden),
+                "{name} depends on {forbidden}"
+            );
         }
     }
 }

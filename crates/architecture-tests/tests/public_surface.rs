@@ -13,7 +13,8 @@ use architecture_tests::workspace_root;
 
 /// Top-level `pub` items in a crate's `lib.rs`.
 fn exported(crate_dir: &str) -> BTreeSet<String> {
-    let text = std::fs::read_to_string(workspace_root().join(crate_dir).join("src/lib.rs")).unwrap();
+    let text =
+        std::fs::read_to_string(workspace_root().join(crate_dir).join("src/lib.rs")).unwrap();
     let production = text.split("#[cfg(test)]").next().unwrap_or_default();
 
     production
@@ -35,14 +36,24 @@ fn assert_exports(crate_dir: &str, allowed: &[&str]) {
     let exported = exported(crate_dir);
     let extra: Vec<&String> = exported.difference(&allowed).collect();
 
-    assert!(extra.is_empty(), "{crate_dir} exports more than its composition surface: {extra:?}");
+    assert!(
+        extra.is_empty(),
+        "{crate_dir} exports more than its composition surface: {extra:?}"
+    );
 }
 
 #[test]
 fn catalog_exports_only_its_composition_surface() {
     assert_exports(
         "crates/module-catalog",
-        &["pub struct CatalogModule", "pub const NAME", "pub const PREFIX", "pub const SCHEMA", "pub const TAG", "pub const DEFAULT_CACHE_SIZE"],
+        &[
+            "pub struct CatalogModule",
+            "pub const NAME",
+            "pub const PREFIX",
+            "pub const SCHEMA",
+            "pub const TAG",
+            "pub const DEFAULT_CACHE_SIZE",
+        ],
     );
 }
 
@@ -66,7 +77,14 @@ fn orders_exports_only_its_composition_surface() {
 fn administration_exports_only_its_composition_surface() {
     assert_exports(
         "crates/module-admin",
-        &["pub struct AdministrationModule", "pub const NAME", "pub const PREFIX", "pub const SCHEMA", "pub const TAG", "pub const DEFAULT_CACHE_SIZE"],
+        &[
+            "pub struct AdministrationModule",
+            "pub const NAME",
+            "pub const PREFIX",
+            "pub const SCHEMA",
+            "pub const TAG",
+            "pub const DEFAULT_CACHE_SIZE",
+        ],
     );
 }
 
@@ -74,7 +92,14 @@ fn administration_exports_only_its_composition_surface() {
 fn reporting_exports_only_its_composition_surface() {
     assert_exports(
         "crates/module-reporting",
-        &["pub struct ReportingModule", "pub const NAME", "pub const PREFIX", "pub const SCHEMA", "pub const TAG", "pub const CONNECTION_NAME"],
+        &[
+            "pub struct ReportingModule",
+            "pub const NAME",
+            "pub const PREFIX",
+            "pub const SCHEMA",
+            "pub const TAG",
+            "pub const CONNECTION_NAME",
+        ],
     );
 }
 

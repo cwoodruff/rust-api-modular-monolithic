@@ -60,8 +60,23 @@ async fn healthz(State(checks): State<Arc<[HealthCheckRegistration]>>) -> Respon
     let mut worst = HealthStatus::Healthy;
     let mut modules = Map::new();
 
-    for registration in checks.iter() {
-        let result = registration.check.check().await;
+    // Concurrently, as ASP.NET's `HealthCheckService` runs them: one
+    // unreachable database costs one timeout, not one per module.
+    let running: Vec<_> = checks
+        .iter()
+        .map(|registration| {
+            let check = Arc::clone(&registration.check);
+            tokio::spawn(async move { check.check().await })
+        })
+        .collect();
+
+    for (registration, task) in checks.iter().zip(running) {
+        let result = task
+            .await
+            .unwrap_or_else(|_| shared_kernel::diagnostics::HealthCheckResult {
+                status: HealthStatus::Unhealthy,
+                description: format!("{}DbContext cannot connect", registration.name),
+            });
         worst = match (worst, result.status) {
             (_, HealthStatus::Unhealthy) | (HealthStatus::Unhealthy, _) => HealthStatus::Unhealthy,
             (_, HealthStatus::Degraded) | (HealthStatus::Degraded, _) => HealthStatus::Degraded,

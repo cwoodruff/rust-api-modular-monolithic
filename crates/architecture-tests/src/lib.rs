@@ -36,7 +36,9 @@ pub fn workspace_root() -> PathBuf {
         {
             return current.to_path_buf();
         }
-        current = current.parent().unwrap_or_else(|| panic!("no workspace above {}", current.display()));
+        current = current
+            .parent()
+            .unwrap_or_else(|| panic!("no workspace above {}", current.display()));
     }
 }
 
@@ -49,14 +51,24 @@ pub fn workspace_root() -> PathBuf {
 #[must_use]
 pub fn workspace_dependency_graph() -> BTreeMap<String, BTreeSet<String>> {
     let output = Command::new(env!("CARGO"))
-        .args(["metadata", "--no-deps", "--format-version", "1", "--manifest-path"])
+        .args([
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+        ])
         .arg(workspace_root().join("Cargo.toml"))
         .output()
         .unwrap_or_else(|error| panic!("`cargo metadata` should run: {error}"));
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("metadata should be JSON: {error}"));
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("metadata should be JSON: {error}"));
 
     metadata["packages"]
         .as_array()
@@ -84,12 +96,18 @@ pub fn workspace_dependency_graph() -> BTreeMap<String, BTreeSet<String>> {
 #[must_use]
 pub fn direct_dependencies(crate_name: &str) -> BTreeSet<String> {
     let output = Command::new(env!("CARGO"))
-        .args(["metadata", "--no-deps", "--format-version", "1", "--manifest-path"])
+        .args([
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+        ])
         .arg(workspace_root().join("Cargo.toml"))
         .output()
         .unwrap_or_else(|error| panic!("`cargo metadata` should run: {error}"));
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("metadata should be JSON: {error}"));
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("metadata should be JSON: {error}"));
 
     metadata["packages"]
         .as_array()
@@ -120,14 +138,20 @@ pub fn sources(crate_dir: &str) -> Vec<(PathBuf, String)> {
     let mut pending = vec![root];
 
     while let Some(directory) = pending.pop() {
-        let entries = std::fs::read_dir(&directory).unwrap_or_else(|error| panic!("{}: {error}", directory.display()));
+        let entries = std::fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("{}: {error}", directory.display()));
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 pending.push(path);
             } else if path.extension().is_some_and(|extension| extension == "rs") {
-                let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-                let production = text.split("#[cfg(test)]").next().unwrap_or_default().to_owned();
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                let production = text
+                    .split("#[cfg(test)]")
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
                 files.push((path, production));
             }
         }

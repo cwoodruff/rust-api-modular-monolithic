@@ -48,7 +48,9 @@ fn contracts_hold_only_data_and_constants() {
                 }
 
                 assert!(
-                    !(trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") || trimmed.starts_with("pub(crate) fn ")),
+                    !(trimmed.starts_with("fn ")
+                        || trimmed.starts_with("pub fn ")
+                        || trimmed.starts_with("pub(crate) fn ")),
                     "{} has a function outside an IntegrationEvent impl: {trimmed}",
                     path.display()
                 );
@@ -69,8 +71,14 @@ fn public_types(crate_dir: &str) -> Vec<String> {
             let trimmed = line.trim_start();
             for keyword in ["pub struct ", "pub enum ", "pub trait ", "pub type "] {
                 if let Some(rest) = trimmed.strip_prefix(keyword) {
-                    let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-                    found.push(format!("{}::{name}", path.file_stem().unwrap().to_string_lossy()));
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    found.push(format!(
+                        "{}::{name}",
+                        path.file_stem().unwrap().to_string_lossy()
+                    ));
                 }
             }
         }
@@ -83,7 +91,11 @@ fn public_types(crate_dir: &str) -> Vec<String> {
 fn the_kernels_public_surface_stays_within_budget() {
     let types = public_types("crates/shared-kernel");
 
-    assert!(types.len() > 30, "the scan found only {} types; is it reading the kernel?", types.len());
+    assert!(
+        types.len() > 30,
+        "the scan found only {} types; is it reading the kernel?",
+        types.len()
+    );
     assert!(
         types.len() <= KERNEL_PUBLIC_TYPE_BUDGET,
         "shared-kernel exports {} public types, over its budget of {KERNEL_PUBLIC_TYPE_BUDGET}: {types:#?}",
@@ -98,14 +110,28 @@ fn the_kernels_public_surface_stays_within_budget() {
 /// else; every other file reaches them through its aliases.
 #[test]
 fn the_kernel_names_the_database_driver_in_one_file() {
-    let forbidden = ["sqlx::postgres", "sqlx::Postgres", "PgPool", "PgConnection", "PgRow", "PgConnectOptions"];
+    let forbidden = [
+        "sqlx::postgres",
+        "sqlx::Postgres",
+        "PgPool",
+        "PgConnection",
+        "PgRow",
+        "PgConnectOptions",
+    ];
 
     for (path, text) in sources("crates/shared-kernel") {
-        if path.file_name().is_some_and(|name| name == "persistence.rs") {
+        if path
+            .file_name()
+            .is_some_and(|name| name == "persistence.rs")
+        {
             continue;
         }
         for name in forbidden {
-            assert!(!text.contains(name), "{} names `{name}`; use the aliases in persistence.rs", path.display());
+            assert!(
+                !text.contains(name),
+                "{} names `{name}`; use the aliases in persistence.rs",
+                path.display()
+            );
         }
     }
 }
@@ -117,7 +143,11 @@ fn the_kernel_names_the_database_driver_in_one_file() {
 fn contracts_expose_everything_they_declare() {
     for crate_dir in CONTRACTS {
         for (path, text) in sources(crate_dir) {
-            assert!(!text.contains("pub(crate)"), "{} hides part of a contract", path.display());
+            assert!(
+                !text.contains("pub(crate)"),
+                "{} hides part of a contract",
+                path.display()
+            );
         }
     }
 }

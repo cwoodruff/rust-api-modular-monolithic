@@ -12,25 +12,44 @@ async fn a_finalized_invoice_reaches_both_consumers() {
     let host = common::host().await;
     let token = host.token("admin").await;
 
-    let invoice = host.send(TestRequest::get("/api/orders/invoices/1").bearer(&token)).await.json();
+    let invoice = host
+        .send(TestRequest::get("/api/orders/invoices/1").bearer(&token))
+        .await
+        .json();
     let customer = invoice["CustomerId"].as_i64().unwrap();
     let track = invoice["InvoiceLines"][0]["TrackId"].as_i64().unwrap();
 
-    let finalized = host.send(TestRequest::post("/api/orders/invoices/1/finalize").bearer(&token)).await;
+    let finalized = host
+        .send(TestRequest::post("/api/orders/invoices/1/finalize").bearer(&token))
+        .await;
     assert_eq!(finalized.status, 202);
-    assert_eq!(finalized.header("location").as_deref(), Some("/api/orders/invoices/1"));
+    assert_eq!(
+        finalized.header("location").as_deref(),
+        Some("/api/orders/invoices/1")
+    );
 
-    let before = host.send(TestRequest::get(&format!("/api/catalog/tracks/{track}/sales")).bearer(&token)).await.json();
-    assert_eq!(before["TimesSold"], 0, "nothing is counted until the outbox is dispatched");
+    let before = host
+        .send(TestRequest::get(&format!("/api/catalog/tracks/{track}/sales")).bearer(&token))
+        .await
+        .json();
+    assert_eq!(
+        before["TimesSold"], 0,
+        "nothing is counted until the outbox is dispatched"
+    );
 
     let processed = api_dispatch(&host).await;
     assert_eq!(processed, 1);
 
-    let after = host.send(TestRequest::get(&format!("/api/catalog/tracks/{track}/sales")).bearer(&token)).await.json();
+    let after = host
+        .send(TestRequest::get(&format!("/api/catalog/tracks/{track}/sales")).bearer(&token))
+        .await
+        .json();
     assert_eq!(after["TimesSold"], 1);
 
     let purchases = host
-        .send(TestRequest::get(&format!("/api/admin/customers/{customer}/purchases")).bearer(&token))
+        .send(
+            TestRequest::get(&format!("/api/admin/customers/{customer}/purchases")).bearer(&token),
+        )
         .await
         .json();
     assert_eq!(purchases["InvoiceCount"], 1);
@@ -39,5 +58,8 @@ async fn a_finalized_invoice_reaches_both_consumers() {
 
 /// Runs one dispatcher batch, as upstream's test calls `ProcessBatchAsync`.
 async fn api_dispatch(host: &common::TestHost) -> usize {
-    host.host.dispatch_outbox_once().await.expect("the batch should run")
+    host.host
+        .dispatch_outbox_once()
+        .await
+        .expect("the batch should run")
 }

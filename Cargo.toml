@@ -95,8 +95,6 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # --- test-only -------------------------------------------------------------
 axum-test = "17"
-testcontainers = { version = "0.25", features = ["blocking"] }
-testcontainers-modules = { version = "0.13", features = ["postgres", "blocking"] }
 mockall = "0.13"
 pretty_assertions = "1"
 

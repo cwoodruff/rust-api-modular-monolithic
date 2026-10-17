@@ -16,6 +16,7 @@ use shared_kernel::hosting::RunningServices;
 use test_support::http::{TestRequest, TestResponse};
 use test_support::postgres;
 
+#[allow(unused_imports)]
 pub use test_support::http;
 
 /// The password every test login uses.
@@ -40,8 +41,11 @@ pub fn users() -> Value {
 
 /// Signing keys generated once per process: no key file is written.
 fn keys() -> Arc<dyn module_identity::KeyMaterial> {
-    static KEYS: std::sync::OnceLock<Arc<dyn module_identity::KeyMaterial>> = std::sync::OnceLock::new();
-    Arc::clone(KEYS.get_or_init(|| Arc::new(module_identity::DevKeyMaterial::generate().expect("a key should generate"))))
+    static KEYS: std::sync::OnceLock<Arc<dyn module_identity::KeyMaterial>> =
+        std::sync::OnceLock::new();
+    Arc::clone(KEYS.get_or_init(|| {
+        Arc::new(module_identity::DevKeyMaterial::generate().expect("a key should generate"))
+    }))
 }
 
 fn options() -> HostOptions {
@@ -67,7 +71,9 @@ async fn template() -> String {
                     "Outbox": { "Enabled": false }
                 }),
             );
-            api::build(config, options()).await.expect("the template host should migrate and seed");
+            api::build(config, options())
+                .await
+                .expect("the template host should migrate and seed");
         })
         .await
 }
@@ -90,10 +96,21 @@ impl TestHost {
     /// Logs in and returns the access token.
     pub async fn token(&self, username: &str) -> String {
         let response = self
-            .send(TestRequest::post("/api/identity/login").json(&json!({ "username": username, "password": PASSWORD })))
+            .send(
+                TestRequest::post("/api/identity/login")
+                    .json(&json!({ "username": username, "password": PASSWORD })),
+            )
             .await;
-        assert_eq!(response.status, 200, "login for {username} failed: {}", response.text());
-        response.json()["access_token"].as_str().expect("a token").to_owned()
+        assert_eq!(
+            response.status,
+            200,
+            "login for {username} failed: {}",
+            response.text()
+        );
+        response.json()["access_token"]
+            .as_str()
+            .expect("a token")
+            .to_owned()
     }
 
     /// Starts the dispatchers, queues and jobs, as the binary does.
@@ -109,6 +126,22 @@ pub async fn host() -> TestHost {
 
 /// The full host in `environment`, with `overrides` on top of the test defaults.
 pub async fn host_with(environment: Environment, overrides: Value) -> TestHost {
+    host_with_keys(environment, overrides, keys()).await
+}
+
+/// The same, signing with keys of its own: a token another host issued is
+/// signed by someone else as far as this one is concerned.
+pub async fn host_with_own_keys(environment: Environment, overrides: Value) -> TestHost {
+    let keys: Arc<dyn module_identity::KeyMaterial> =
+        Arc::new(module_identity::DevKeyMaterial::generate().expect("a key should generate"));
+    host_with_keys(environment, overrides, keys).await
+}
+
+async fn host_with_keys(
+    environment: Environment,
+    overrides: Value,
+    keys: Arc<dyn module_identity::KeyMaterial>,
+) -> TestHost {
     let server = postgres::server();
     let database = server.clone_of(&template().await).await;
 
@@ -127,7 +160,13 @@ pub async fn host_with(environment: Environment, overrides: Value) -> TestHost {
     )
     .with_overrides(overrides);
 
-    let host = api::build(config, options()).await.expect("the test host should build");
+    let options = HostOptions {
+        identity_keys: Some(keys),
+        ..HostOptions::new(test_support::content_root())
+    };
+    let host = api::build(config, options)
+        .await
+        .expect("the test host should build");
 
     TestHost {
         host,

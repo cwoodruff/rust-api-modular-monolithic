@@ -246,14 +246,18 @@ impl ModuleDatabase {
     ///
     /// Any query failure, including a schema not migrated yet.
     pub async fn applied_migrations(&self) -> Result<Vec<i64>, PersistenceError> {
+        // Through the owner's connection, as migrating is: Reporting's
+        // runtime login may read its views but not its history table.
+        let mut connection = self.migration_options.connect().await?;
         let versions = sqlx::query_scalar(&format!(
             r#"SELECT version FROM "{}"._sqlx_migrations ORDER BY version"#,
             self.schema
         ))
-        .fetch_all(&self.pool)
-        .await?;
+        .fetch_all(&mut connection)
+        .await;
+        connection.close().await?;
 
-        Ok(versions)
+        Ok(versions?)
     }
 
     /// Whether a connection can be opened and used.
