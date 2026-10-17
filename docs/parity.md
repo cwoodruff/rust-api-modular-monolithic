@@ -55,6 +55,12 @@ For each case the harness compares:
 Member order does differ in places. JSON objects are unordered, and no client
 can depend on it.
 
+One case, `/api/catalog/tracks/playlist/1`, compares its rows sorted by `Id`.
+Upstream joins `PlaylistTrack` to `Track` with no `ORDER BY`, and the order the
+original answers in follows the planner's choice of join, which turns on table
+statistics: CI saw `PlaylistTrack` order where a local run saw `Track` order.
+No fixed order could match both, so the case checks the same rows in any order.
+
 ## Result
 
 **133 of 134 identical, one known divergence, no unexplained differences.**

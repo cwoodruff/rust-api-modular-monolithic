@@ -36,6 +36,15 @@ trips them, so the runner counts requests per policy and waits out the window
 before any one of them runs dry, rather than letting a 429 masquerade as a
 difference. `/healthz`, Swagger and unmatched routes are not limited.
 
+## Unordered cases
+
+Upstream's tracks-by-playlist query joins `PlaylistTrack` to `Track` with no
+`ORDER BY`, so the original answers in whichever order the planner's join
+produces — `Track` order on one machine, `PlaylistTrack` order on another,
+depending on table statistics. No fixed order in the port can match that, so
+cases marked `unordered` compare their arrays sorted by `Id`: the same rows,
+in any order.
+
 ## Known divergences
 
 One case is expected to differ, and is reported as `known` rather than as a
@@ -160,6 +169,9 @@ class Case:
     #: Compare the status only: the body is a document each framework
     #: generates its own way (Swagger).
     status_only: bool = False
+    #: The original's query has no `ORDER BY` and its row order depends on
+    #: the plan; compare the array's rows sorted by `Id` rather than in order.
+    unordered: bool = False
     #: Seconds to wait after this case, for both outbox dispatchers to deliver.
     settle: float = 0
 
@@ -237,7 +249,11 @@ def cases() -> list[Case]:
         "/api/admin/media-types/1",
         "/api/admin/media-types",
     ]
-    built += [Case(f"read {path}", path, role="admin") for path in reads]
+    unordered_reads = {"/api/catalog/tracks/playlist/1"}
+    built += [
+        Case(f"read {path}", path, role="admin", unordered=path in unordered_reads)
+        for path in reads
+    ]
 
     # Absent ids: the 404 document, and the empty-array collections.
     missing_items = [
@@ -584,6 +600,11 @@ def leaf_differences(left: object, right: object, path: str = "") -> list[str]:
     return found[:6]
 
 
+def sorted_by_id(rows: list) -> list:
+    return sorted(rows, key=lambda row: (row.get("Id", 0) if isinstance(row, dict) else 0,
+                                         json.dumps(row, sort_keys=True)))
+
+
 def compare(case: Case, original: Outcome, port: Outcome) -> list[str]:
     problems: list[str] = []
 
@@ -598,7 +619,11 @@ def compare(case: Case, original: Outcome, port: Outcome) -> list[str]:
         if left != right:
             problems.append(f"header {header}: original {left!r}, port {right!r}")
 
-    problems += leaf_differences(original.body, port.body)
+    left, right = original.body, port.body
+    if case.unordered and isinstance(left, list) and isinstance(right, list):
+        left, right = sorted_by_id(left), sorted_by_id(right)
+
+    problems += leaf_differences(left, right)
 
     return problems
 
