@@ -149,21 +149,57 @@ it again.
 
 The data routes need a token, and there are no seeded users: the original
 ships an empty list and expects user secrets to fill it, and so does this.
-Logins are read **at startup**.
 
-The host reads user secrets in Development and Demo from the original's
-`UserSecretsId`, so the original's own commands work, run from its checkout:
+In Development and Demo the host reads logins from a user-secrets file,
+`secrets.json`. The Rust host does not run `dotnet user-secrets`; it reads the
+file that tool writes, from the folder named after the original's
+`UserSecretsId` (`e5c98386-8439-49a8-a3d8-cf17fcb7b6dc`):
+
+| OS | Path |
+|---|---|
+| macOS, Linux | `~/.microsoft/usersecrets/e5c98386-8439-49a8-a3d8-cf17fcb7b6dc/secrets.json` |
+| Windows | `%APPDATA%\Microsoft\UserSecrets\e5c98386-8439-49a8-a3d8-cf17fcb7b6dc\secrets.json` |
+
+So one file feeds both the original and this port. The file sits outside the
+repository, so it can't be committed by accident. Production and Test never
+read it. Any of three ways of providing logins works:
+
+**1. Write the file yourself** (no .NET needed). Flat colon-joined keys, as
+`dotnet user-secrets` writes them, and nested JSON both work:
 
 ```sh
-dotnet user-secrets --project src/ModularMonolith.Api set "Identity:InMemoryUsers:0:Username" "demo"
-dotnet user-secrets --project src/ModularMonolith.Api set "Identity:InMemoryUsers:0:Password" '<a-password>'
-dotnet user-secrets --project src/ModularMonolith.Api set "Identity:InMemoryUsers:0:UserId" "user-1"
-dotnet user-secrets --project src/ModularMonolith.Api set "Identity:InMemoryUsers:0:Tenant" "tenant-1"
-dotnet user-secrets --project src/ModularMonolith.Api set "Identity:InMemoryUsers:0:Permissions:0" "catalog.read"
+mkdir -p ~/.microsoft/usersecrets/e5c98386-8439-49a8-a3d8-cf17fcb7b6dc
+cat > ~/.microsoft/usersecrets/e5c98386-8439-49a8-a3d8-cf17fcb7b6dc/secrets.json <<'JSON'
+{
+  "Identity:InMemoryUsers:0:Username": "demo",
+  "Identity:InMemoryUsers:0:Password": "secret123",
+  "Identity:InMemoryUsers:0:UserId": "user-1",
+  "Identity:InMemoryUsers:0:Tenant": "tenant-1",
+  "Identity:InMemoryUsers:0:Permissions:0": "catalog.read"
+}
+JSON
 ```
 
-`USER_SECRETS_PATH` points at a `secrets.json` elsewhere. Environment
-variables work too, and override secrets:
+`USER_SECRETS_PATH=/some/other/secrets.json` reads a file elsewhere instead.
+
+**2. Use `dotnet user-secrets`**, if you have the .NET SDK. `--id` names the
+store directly, so no checkout of the original is needed. Single-quote the
+password so the shell leaves `$`, `!` and backticks alone:
+
+```sh
+ID=e5c98386-8439-49a8-a3d8-cf17fcb7b6dc
+dotnet user-secrets --id $ID set "Identity:InMemoryUsers:0:Username" "demo"
+dotnet user-secrets --id $ID set "Identity:InMemoryUsers:0:Password" '<a-password>'
+dotnet user-secrets --id $ID set "Identity:InMemoryUsers:0:UserId" "user-1"
+dotnet user-secrets --id $ID set "Identity:InMemoryUsers:0:Tenant" "tenant-1"
+dotnet user-secrets --id $ID set "Identity:InMemoryUsers:0:Permissions:0" "catalog.read"
+```
+
+From the original's checkout, `--project src/ModularMonolith.Api` in place of
+`--id $ID` writes the same file.
+
+**3. Use environment variables**, which override the file key by key, in
+any environment:
 
 ```sh
 export Identity__InMemoryUsers__0__Username=demo
@@ -172,6 +208,8 @@ export Identity__InMemoryUsers__0__UserId=user-1
 export Identity__InMemoryUsers__0__Tenant=tenant-1
 export Identity__InMemoryUsers__0__Permissions__0=catalog.read
 ```
+
+Whichever you use, **restart the host** afterwards. Logins are read at startup only.
 
 The startup log says what loaded, with the original's messages:
 
