@@ -1,6 +1,6 @@
 # Phase 9 — A container that runs, and the docs to go with it
 
-*Learning Rust through the port, part 10 of 10.*
+*Learning Rust through the port, part 10 of 11.*
 
 | | |
 |---|---|
@@ -9,7 +9,7 @@
 | **Files to open** | `Dockerfile`, `.dockerignore`, `README.md`, `Cargo.toml` (`[profile.release]`), `docs/{architecture,caching,authn-authz,parity}.md`, and any `//!` crate doc |
 | **Rust ideas introduced** | Release profiles (`lto`, `codegen-units`, `strip`), how Cargo caches dependency builds and how to exploit that in Docker, `--locked`, binary naming, static versus dynamic linking on Linux, fail-fast startup with `anyhow`, rustdoc conventions (`//!`, `///`, intra-doc links, `# Errors` sections), `cargo doc` |
 
-The last phase has the least Rust *code* and the most Rust *tooling*. It is
+The last phase of the first port has the least Rust *code* and the most Rust *tooling*. It is
 where you learn what a Rust build actually produces, how long it takes, how
 to make it not take that long twice, and how the documentation you have been
 reading in every other phase was written.
@@ -248,5 +248,5 @@ been executed, not when the code compiles.
 | DocFX site | `cargo doc --workspace --no-deps --open` | Built in |
 | Startup validation / `IStartupFilter` | `Result` from `main` via `anyhow` | Chain printed on exit |
 
-**Back to the start:** [Phase 0 — the scaffold](phase-0-scaffold.md), or the
-[index](README.md) for the whole series.
+**Next:** [Phase 10 — following the original's upgrade](phase-10-the-upgrade.md),
+or the [index](README.md) for the whole series.

@@ -15,24 +15,35 @@ difference).
 
 ## What is deliberately not compared
 
-Five members cannot match by construction. They are scrubbed rather than
+Several members cannot match by construction. They are scrubbed rather than
 excused case by case:
 
   timestampUtc  a wall clock reading
   traceId       a per-request correlation id
   version       the .NET informational version embeds the build's commit hash
   kid, n        JWKS key material; each host generates its own signing key
+  RanAt, DetectedAt, totalDurationMs
+                when an integrity run happened, and how long /healthz took
 
 Two more are compared loosely because their *value* is per-request but their
 *shape* is not: `access_token` and `refresh_token`.
 
 ## Pacing
 
-Every endpoint in the application shares one rate-limit budget — 60 requests
-per 60 seconds per client — so a sweep this size trips it. The runner paces
-itself: after `WINDOW_BUDGET` requests it waits out the window rather than
-letting a 429 masquerade as a difference. That is the original's behavior
-faithfully reproduced, not a workaround.
+Each module group has its own rate-limit budget — 60 requests per 60 seconds
+per client — and the root endpoint has another (ADR-0013). A sweep this size
+trips them, so the runner counts requests per policy and waits out the window
+before any one of them runs dry, rather than letting a 429 masquerade as a
+difference. `/healthz`, Swagger and unmatched routes are not limited.
+
+## Unordered cases
+
+Upstream's tracks-by-playlist query joins `PlaylistTrack` to `Track` with no
+`ORDER BY`, so the original answers in whichever order the planner's join
+produces — `Track` order on one machine, `PlaylistTrack` order on another,
+depending on table statistics. No fixed order in the port can match that, so
+cases marked `unordered` compare their arrays sorted by `Id`: the same rows,
+in any order.
 
 ## Known divergences
 
@@ -64,6 +75,9 @@ VOLATILE_MEMBERS = {
     "access_token",
     "refresh_token",
     "expires_at_utc",
+    "RanAt",
+    "DetectedAt",
+    "totalDurationMs",
 }
 
 COMPARED_HEADERS = [
@@ -78,45 +92,57 @@ COMPARED_HEADERS = [
     "permissions-policy",
 ]
 
-#: Requests to send per service before waiting out the rate-limit window. The
-#: limit is 60; this leaves room for the logins and a little slack.
+#: Requests to send per policy and service before waiting out the window.
+#: Each limit is 60; this leaves room for the logins and a little slack.
 WINDOW_BUDGET = 50
 
 #: The window itself, plus a second so the reset has certainly happened.
 WINDOW_SECONDS = 61
 
+#: Which rate-limit policy a path is charged to. Each module group has its
+#: own budget and the root has `global:public-anon`; everything else —
+#: /healthz, Swagger, unmatched routes — is not limited.
+POLICY_PREFIXES = [
+    ("/api/catalog/", "catalog:api"),
+    ("/api/orders/", "orders:api"),
+    ("/api/admin/", "admin:api"),
+    ("/api/identity/", "identity:api"),
+    ("/api/reporting/", "reporting:api"),
+]
+
+
+def policy_of(path: str) -> str | None:
+    if path == "/":
+        return "global:public-anon"
+    for prefix, policy in POLICY_PREFIXES:
+        if path.startswith(prefix):
+            return policy
+    return None
+
 
 class Pacer:
-    """Keeps a sweep under the shared rate-limit budget."""
+    """Keeps a sweep under every policy's budget."""
 
     def __init__(self, budget: int = WINDOW_BUDGET, window: int = WINDOW_SECONDS) -> None:
         self.budget = budget
         self.window = window
-        self.sent = 0
+        self.sent: dict[str, int] = {}
 
-    def before_request(self) -> None:
-        if self.sent >= self.budget:
-            print(f"  ...  pausing {self.window}s for the rate-limit window", flush=True)
+    def charge(self, path: str) -> None:
+        policy = policy_of(path)
+        if policy is None:
+            return
+        if self.sent.get(policy, 0) >= self.budget:
+            print(f"  ...  pausing {self.window}s for the {policy} window", flush=True)
             time.sleep(self.window)
-            self.sent = 0
-        self.sent += 1
+            self.sent = {}
+        self.sent[policy] = self.sent.get(policy, 0) + 1
 
+    def reset(self) -> None:
+        self.sent = {}
 
-#: Security headers the original loses on exception-handled responses.
-SECURITY_HEADER_NOTE = (
-    "The original answers validation failures with no security headers at "
-    "all. Its security-headers middleware sets them *before* calling the rest "
-    "of the pipeline, and UseExceptionHandler clears the response before "
-    "writing the problem document — which wipes them. This port sets them on "
-    "the way out, so an error response keeps them. Not reproduced: losing "
-    "nosniff and the CSP on an error response is a real weakness, and no "
-    "client depends on a header being absent. Worth reporting upstream."
-)
 
 KNOWN_DIVERGENCES = {
-    "write: create with a null name": SECURITY_HEADER_NOTE,
-    "write: create with an over-long name": SECURITY_HEADER_NOTE,
-    "write: update with an over-long name": SECURITY_HEADER_NOTE,
     "write: malformed json": (
         "The `detail` of a malformed-body problem is the parser's own "
         "diagnostic. .NET's names its internals — 'Failed to read parameter "
@@ -140,6 +166,14 @@ class Case:
     #: Send no `Content-Type`, to exercise the unsupported-media-type path.
     omit_content_type: bool = False
     tenant: str | None = None
+    #: Compare the status only: the body is a document each framework
+    #: generates its own way (Swagger).
+    status_only: bool = False
+    #: The original's query has no `ORDER BY` and its row order depends on
+    #: the plan; compare the array's rows sorted by `Id` rather than in order.
+    unordered: bool = False
+    #: Seconds to wait after this case, for both outbox dispatchers to deliver.
+    settle: float = 0
 
 
 @dataclass
@@ -160,7 +194,7 @@ class Report:
 # The cases
 # --------------------------------------------------------------------------
 
-MODULE_PREFIXES = ["/api/admin", "/api/identity", "/api/music", "/api/orders", "/api/reporting"]
+MODULE_PREFIXES = ["/api/admin", "/api/identity", "/api/catalog", "/api/orders", "/api/reporting"]
 
 
 def cases() -> list[Case]:
@@ -177,22 +211,22 @@ def cases() -> list[Case]:
 
     # Reads, as a caller holding every permission.
     reads = [
-        "/api/music/albums/1",
-        "/api/music/albums",
-        "/api/music/albums/",
-        "/api/music/albums/artist/1",
-        "/api/music/artists/1",
-        "/api/music/artists",
-        "/api/music/playlists/1",
-        "/api/music/playlists",
-        "/api/music/tracks/1",
-        "/api/music/tracks",
-        "/api/music/tracks/album/1",
-        "/api/music/tracks/artist/1",
-        "/api/music/tracks/genre/1",
-        "/api/music/tracks/mediatype/1",
-        "/api/music/tracks/playlist/1",
-        "/api/music/tracks/invoice/1",
+        "/api/catalog/albums/1",
+        "/api/catalog/albums",
+        "/api/catalog/albums/",
+        "/api/catalog/albums/artist/1",
+        "/api/catalog/artists/1",
+        "/api/catalog/artists",
+        "/api/catalog/playlists/1",
+        "/api/catalog/playlists",
+        "/api/catalog/tracks/1",
+        "/api/catalog/tracks",
+        "/api/catalog/tracks/album/1",
+        "/api/catalog/tracks/artist/1",
+        "/api/catalog/tracks/genre/1",
+        "/api/catalog/tracks/mediatype/1",
+        "/api/catalog/tracks/playlist/1",
+        "/api/catalog/tracks/1/sales",
         "/api/orders/invoices/1",
         "/api/orders/invoices",
         "/api/orders/invoices/customer/1",
@@ -203,46 +237,100 @@ def cases() -> list[Case]:
         "/api/admin/customers/1",
         "/api/admin/customers",
         "/api/admin/customers/support-rep/3",
+        "/api/admin/customers/1/purchases",
         "/api/admin/employees/1",
         "/api/admin/employees/2",
         "/api/admin/employees",
         "/api/admin/employees/2/direct-reports",
         "/api/admin/employees/2/reports-to",
+        "/api/admin/employees/1/reports-to",
         "/api/admin/genres/1",
         "/api/admin/genres",
         "/api/admin/media-types/1",
         "/api/admin/media-types",
     ]
-    built += [Case(f"read {path}", path, role="admin") for path in reads]
+    unordered_reads = {"/api/catalog/tracks/playlist/1"}
+    built += [
+        Case(f"read {path}", path, role="admin", unordered=path in unordered_reads)
+        for path in reads
+    ]
 
     # Absent ids: the 404 document, and the empty-array collections.
     missing_items = [
-        "/api/music/albums/999999",
-        "/api/music/artists/999999",
-        "/api/music/playlists/999999",
-        "/api/music/tracks/999999",
+        "/api/catalog/albums/999999",
+        "/api/catalog/artists/999999",
+        "/api/catalog/playlists/999999",
+        "/api/catalog/tracks/999999",
         "/api/orders/invoices/999999",
         "/api/orders/invoice-lines/999999",
         "/api/admin/customers/999999",
         "/api/admin/employees/999999",
         "/api/admin/genres/999999",
         "/api/admin/media-types/999999",
+        "/api/catalog/tracks/999999/sales",
+        "/api/admin/customers/999999/purchases",
+        "/api/reporting/invoices/999999/lines",
     ]
     built += [Case(f"missing {path}", path, role="admin") for path in missing_items]
 
     empty_collections = [
-        "/api/music/albums/artist/999999",
-        "/api/music/tracks/album/999999",
+        "/api/catalog/albums/artist/999999",
+        "/api/catalog/tracks/album/999999",
         "/api/orders/invoices/customer/999999",
         "/api/admin/customers/support-rep/999999",
         "/api/admin/employees/999999/direct-reports",
     ]
     built += [Case(f"empty {path}", path, role="admin") for path in empty_collections]
 
+    built += [
+        Case("removed: tracks by invoice", "/api/catalog/tracks/invoice/1", role="admin"),
+        Case("constraint: non-numeric id", "/api/catalog/albums/abc", role="admin"),
+        Case("constraint: non-guid dead letter", "/api/orders/outbox/dead-letters/abc/retry", method="POST", role="admin"),
+        Case("healthz", "/healthz"),
+        Case("swagger ui", "/swagger/index.html", status_only=True),
+        Case("swagger v1", "/swagger/v1/swagger.json", status_only=True),
+    ]
+    built += [
+        Case(f"swagger {doc}", f"/swagger/{doc}/swagger.json", status_only=True)
+        for doc in ["catalog", "orders", "admin", "identity", "reporting"]
+    ]
+
+    # Events: finalize an invoice, then read both read models and the
+    # Reporting views once both dispatchers have had time to deliver.
+    built += [
+        Case("events: sales before", "/api/catalog/tracks/3027/sales", role="admin"),
+        Case("events: purchases before", "/api/admin/customers/46/purchases", role="admin"),
+        Case("events: finalize", "/api/orders/invoices/1/finalize", method="POST", role="admin", settle=3),
+        Case("events: finalize again", "/api/orders/invoices/1/finalize", method="POST", role="admin"),
+        Case("events: finalize missing", "/api/orders/invoices/999999/finalize", method="POST", role="admin"),
+        Case("events: finalize without orders.write", "/api/orders/invoices/2/finalize", method="POST", role="reader"),
+        Case("events: invoice after", "/api/orders/invoices/1", role="admin"),
+        Case("events: sales after", "/api/catalog/tracks/3027/sales", role="admin"),
+        Case("events: purchases after", "/api/admin/customers/46/purchases", role="admin"),
+        Case("events: dead letters", "/api/orders/outbox/dead-letters", role="admin"),
+        Case("events: dead letters without the role", "/api/orders/outbox/dead-letters", role="roleless"),
+        Case(
+            "events: retry an unknown dead letter",
+            "/api/orders/outbox/dead-letters/00000000-0000-0000-0000-000000000001/retry",
+            method="POST",
+            role="admin",
+        ),
+    ]
+
+    # Reporting.
+    built += [
+        Case("reporting: sales by genre", "/api/reporting/sales-by-genre", role="admin"),
+        Case("reporting: invoice lines", "/api/reporting/invoices/1/lines", role="admin"),
+        Case("reporting: without report.view", "/api/reporting/sales-by-genre", role="reader"),
+        Case("reporting: integrity run", "/api/reporting/integrity/run", method="POST", role="admin"),
+        Case("reporting: integrity findings", "/api/reporting/integrity/findings", role="admin"),
+        Case("reporting: integrity without the role", "/api/reporting/integrity/findings", role="roleless"),
+    ]
+
     # The authorization matrix. Anonymous, then a caller holding the wrong
     # permission, against one route from each module.
     guarded = [
-        "/api/music/albums/1",
+        "/api/catalog/albums/1",
         "/api/orders/invoices/1",
         "/api/admin/genres/1",
         "/api/identity/userinfo",
@@ -254,14 +342,14 @@ def cases() -> list[Case]:
     built += [
         Case("no admin role /api/admin/genres/1", "/api/admin/genres/1", role="roleless"),
         Case("no tenant claim /api/admin/genres/1", "/api/admin/genres/1", role="tenantless"),
-        Case("matching tenant header", "/api/music/albums/1", role="admin", tenant="tenant-1"),
-        Case("mismatched tenant header", "/api/music/albums/1", role="admin", tenant="tenant-2"),
+        Case("matching tenant header", "/api/catalog/albums/1", role="admin", tenant="tenant-1"),
+        Case("mismatched tenant header", "/api/catalog/albums/1", role="admin", tenant="tenant-2"),
     ]
 
     # Routing failures.
     built += [
         Case("unknown route", "/does-not-exist"),
-        Case("wrong method", "/api/music/health", method="POST", body="{}"),
+        Case("wrong method", "/api/catalog/health", method="POST", body="{}"),
     ]
 
     # Identity.
@@ -302,6 +390,19 @@ def cases() -> list[Case]:
             "/api/identity/logout",
             method="POST",
             body=json.dumps({"userId": "admin-1", "refreshToken": "x"}),
+        ),
+        Case(
+            "logout blank",
+            "/api/identity/logout",
+            method="POST",
+            role="admin",
+            body=json.dumps({"userId": "", "refreshToken": ""}),
+        ),
+        Case(
+            "login with a missing member",
+            "/api/identity/login",
+            method="POST",
+            body=json.dumps({"username": "admin"}),
         ),
         Case(
             "logout for another user",
@@ -499,18 +600,30 @@ def leaf_differences(left: object, right: object, path: str = "") -> list[str]:
     return found[:6]
 
 
+def sorted_by_id(rows: list) -> list:
+    return sorted(rows, key=lambda row: (row.get("Id", 0) if isinstance(row, dict) else 0,
+                                         json.dumps(row, sort_keys=True)))
+
+
 def compare(case: Case, original: Outcome, port: Outcome) -> list[str]:
     problems: list[str] = []
 
     if original.status != port.status:
         problems.append(f"status: original {original.status}, port {port.status}")
 
+    if case.status_only:
+        return problems
+
     for header in COMPARED_HEADERS:
         left, right = original.headers.get(header), port.headers.get(header)
         if left != right:
             problems.append(f"header {header}: original {left!r}, port {right!r}")
 
-    problems += leaf_differences(original.body, port.body)
+    left, right = original.body, port.body
+    if case.unordered and isinstance(left, list) and isinstance(right, list):
+        left, right = sorted_by_id(left), sorted_by_id(right)
+
+    problems += leaf_differences(left, right)
 
     return problems
 
@@ -532,16 +645,16 @@ def main() -> int:
     }
 
     report = Report()
-    # The four logins above already drew on this window.
+    # The four logins above already drew on Identity's window.
     pacer = Pacer()
-    pacer.sent = len(roles)
+    pacer.sent = {"identity:api": len(roles)}
 
     for case in cases():
         original_token, port_token = (None, None)
         if case.role:
             original_token, port_token = tokens[case.role]
 
-        pacer.before_request()
+        pacer.charge(case.path)
         original = call(arguments.original, case, original_token)
         port = call(arguments.port, case, port_token)
 
@@ -551,9 +664,13 @@ def main() -> int:
             # throttled response as a difference.
             print(f"  ...  throttled on {case.name}; waiting {WINDOW_SECONDS}s", flush=True)
             time.sleep(WINDOW_SECONDS)
-            pacer.sent = 1
+            pacer.reset()
+            pacer.charge(case.path)
             original = call(arguments.original, case, original_token)
             port = call(arguments.port, case, port_token)
+
+        if case.settle:
+            time.sleep(case.settle)
 
         problems = compare(case, original, port)
 

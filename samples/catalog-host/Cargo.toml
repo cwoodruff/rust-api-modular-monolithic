@@ -1,0 +1,48 @@
+[package]
+name = "catalog-host"
+description = "Port of samples/Catalog.Host: Catalog alone in a process of its own. Built and tested, never deployed."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "catalog_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "catalog-host"
+path = "src/main.rs"
+
+[dependencies]
+shared-kernel = { workspace = true }
+module-catalog = { workspace = true }
+# Named because Cargo has no transitive naming; see the crate documentation.
+identity-contracts = { workspace = true }
+orders-contracts = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+test-support = { workspace = true }
+rand = { workspace = true }
+rsa = { workspace = true }

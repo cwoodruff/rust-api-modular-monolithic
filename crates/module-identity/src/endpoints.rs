@@ -2,15 +2,18 @@
 
 use std::sync::Arc;
 
+use axum::Json;
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use shared_kernel::auth::unauthorized;
-use shared_kernel::errors::{current_trace_id, default_problem_type};
-use shared_kernel::guards::Authenticated;
-use shared_kernel::{ApiError, Authorized, ProblemDetails, REDACTED};
+use shared_kernel::auth::{Caller, unauthorized};
+use shared_kernel::diagnostics::ModuleMeter;
+use shared_kernel::endpoints::Endpoints;
+use shared_kernel::errors::current_trace_id;
+use shared_kernel::traffic_control::RateLimiter;
+use shared_kernel::validation::{Validated, ValidationErrors, required};
+use shared_kernel::{ApiError, AppConfig, DatabaseProbe, ProblemDetails, REDACTED, health};
 
 use crate::runtime::IdentityRuntime;
 use crate::tokens::TokenPair;
@@ -23,11 +26,11 @@ use crate::tokens::TokenPair;
 #[derive(Clone, Deserialize)]
 pub struct LoginRequest {
     /// The login name.
-    #[serde(default)]
-    pub username: String,
+    #[serde(default, alias = "Username", alias = "UserName")]
+    pub username: Option<String>,
     /// The password.
-    #[serde(default)]
-    pub password: String,
+    #[serde(default, alias = "Password")]
+    pub password: Option<String>,
 }
 
 impl std::fmt::Debug for LoginRequest {
@@ -44,11 +47,16 @@ impl std::fmt::Debug for LoginRequest {
 #[derive(Clone, Deserialize)]
 pub struct RefreshRequest {
     /// The user whose token is being exchanged.
-    #[serde(default, rename = "userId")]
-    pub user_id: String,
+    #[serde(default, rename = "userId", alias = "UserId", alias = "userid")]
+    pub user_id: Option<String>,
     /// The refresh token.
-    #[serde(default, rename = "refreshToken")]
-    pub refresh_token: String,
+    #[serde(
+        default,
+        rename = "refreshToken",
+        alias = "RefreshToken",
+        alias = "refreshtoken"
+    )]
+    pub refresh_token: Option<String>,
 }
 
 impl std::fmt::Debug for RefreshRequest {
@@ -65,11 +73,16 @@ impl std::fmt::Debug for RefreshRequest {
 #[derive(Clone, Deserialize)]
 pub struct LogoutRequest {
     /// The user whose token is being revoked.
-    #[serde(default, rename = "userId")]
-    pub user_id: String,
+    #[serde(default, rename = "userId", alias = "UserId", alias = "userid")]
+    pub user_id: Option<String>,
     /// The refresh token to revoke.
-    #[serde(default, rename = "refreshToken")]
-    pub refresh_token: String,
+    #[serde(
+        default,
+        rename = "refreshToken",
+        alias = "RefreshToken",
+        alias = "refreshtoken"
+    )]
+    pub refresh_token: Option<String>,
 }
 
 impl std::fmt::Debug for LogoutRequest {
@@ -132,104 +145,122 @@ impl TokenResponse {
 /// Up to seven fractional digits with trailing zeros removed, then the offset.
 /// A whole second drops the fraction entirely.
 fn format_offset(instant: chrono::DateTime<chrono::Utc>) -> String {
-    let ticks = instant.timestamp_subsec_nanos() / 100;
-    let base = instant.format("%Y-%m-%dT%H:%M:%S");
-
-    if ticks == 0 {
-        return format!("{base}+00:00");
-    }
-
-    let fraction = format!("{ticks:07}");
-    let trimmed = fraction.trim_end_matches('0');
-
-    format!("{base}.{trimmed}+00:00")
+    shared_kernel::json::dotnet::date_time_offset(&instant)
 }
 
-/// The `Invalid request` problem both blank-field checks return.
+/// The body validators, ported from `AuthRequestValidators` (18f7f86).
 ///
-/// `Results.Problem(...)` is called without a `type`, so the framework fills
-/// in the one from its defaults table — the `tools.ietf.org` vocabulary, not
-/// the `www.rfc-editor.org` one the custom exception handler passes. Verified
-/// against the running service.
-fn invalid_request(detail: &str) -> ProblemDetails {
-    ProblemDetails {
-        type_uri: default_problem_type(StatusCode::BAD_REQUEST).map(ToOwned::to_owned),
-        title: "Invalid request".to_owned(),
-        status: StatusCode::BAD_REQUEST.as_u16(),
-        detail: Some(detail.to_owned()),
-        instance: None,
-        errors: None,
-        trace_id: current_trace_id(),
-    }
+/// Every field is required: a blank or missing one is `'<field>' is required.`
+/// under its wire name, in declaration order.
+pub(crate) fn validate_login(request: &LoginRequest) -> ValidationErrors {
+    required(&[
+        ("username", request.username.as_deref()),
+        ("password", request.password.as_deref()),
+    ])
 }
 
-/// Mounts the auth endpoints.
+/// The refresh body's rules.
+pub(crate) fn validate_refresh(request: &RefreshRequest) -> ValidationErrors {
+    required(&[
+        ("userId", request.user_id.as_deref()),
+        ("refreshToken", request.refresh_token.as_deref()),
+    ])
+}
+
+/// The logout body's rules.
+pub(crate) fn validate_logout(request: &LogoutRequest) -> ValidationErrors {
+    required(&[
+        ("userId", request.user_id.as_deref()),
+        ("refreshToken", request.refresh_token.as_deref()),
+    ])
+}
+
+type Identity = State<Arc<IdentityState>>;
+
+/// Everything Identity's handlers read.
+pub(crate) struct IdentityState {
+    pub runtime: Arc<IdentityRuntime>,
+    pub rate_limiter: RateLimiter,
+    pub meter: Arc<ModuleMeter>,
+    pub config: Arc<AppConfig>,
+}
+
+/// Maps the auth endpoints.
 ///
 /// Note where JWKS lands: inside the module group, so its real path is
 /// `/api/identity/.well-known/jwks.json` rather than the conventional root
-/// one. That is the original's arrangement and it is wire-visible.
-pub fn routes<S>(runtime: Arc<IdentityRuntime>) -> Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    let login = Arc::clone(&runtime);
-    let refresh = Arc::clone(&runtime);
-    let logout = Arc::clone(&runtime);
-    let jwks = Arc::clone(&runtime);
+/// one. That is the original's arrangement and it is wire-visible (P3).
+pub(crate) fn map(endpoints: &mut Endpoints, state: &Arc<IdentityState>) {
+    let mut group = endpoints.map_group(crate::PREFIX, crate::TAG, Arc::clone(state));
+    group
+        .require_rate_limiting(state.rate_limiter.clone())
+        .add_module_metrics(Arc::clone(&state.meter));
 
-    Router::new()
-        .route(
-            "/login",
-            post(move |Json(request): Json<LoginRequest>| {
-                let runtime = Arc::clone(&login);
-                async move { handle_login(&runtime, request) }
-            }),
-        )
-        .route(
-            "/refresh",
-            post(move |Json(request): Json<RefreshRequest>| {
-                let runtime = Arc::clone(&refresh);
-                async move { handle_refresh(&runtime, request) }
-            }),
-        )
-        .route(
-            "/logout",
-            post(
-                move |caller: Authorized<Authenticated>, Json(request): Json<LogoutRequest>| {
-                    let runtime = Arc::clone(&logout);
-                    async move { handle_logout(&runtime, &caller, request) }
-                },
-            ),
-        )
-        .route("/userinfo", get(handle_userinfo))
-        .route(
-            "/.well-known/jwks.json",
-            get(move || {
-                let runtime = Arc::clone(&jwks);
-                async move { Json(runtime.tokens().jwks()) }
-            }),
-        )
+    health::map_health_endpoints(
+        &mut group,
+        crate::NAME,
+        Arc::new(AppDatabaseProbe(Arc::clone(&state.config))),
+    );
+
+    group
+        .map_post("/login", login)
+        .with_name("IdentityLogin")
+        .with_validation::<LoginRequest>(Arc::new(validate_login))
+        .produces(&[200, 400, 401, 429]);
+    group
+        .map_post("/refresh", refresh)
+        .with_name("IdentityRefresh")
+        .with_validation::<RefreshRequest>(Arc::new(validate_refresh))
+        .produces(&[200, 400, 401, 429]);
+    group
+        .map_post("/logout", logout)
+        .with_name("IdentityLogout")
+        .require_authorization(&[])
+        .with_validation::<LogoutRequest>(Arc::new(validate_logout))
+        .produces(&[204, 400, 401, 403, 429]);
+    group
+        .map_get("/userinfo", userinfo)
+        .with_name("IdentityUserInfo")
+        .require_authorization(&[])
+        .produces(&[200, 401]);
+    group
+        .map_get("/.well-known/jwks.json", jwks)
+        .with_name("IdentityJWKS")
+        .produces(&[200]);
 }
 
-fn handle_login(runtime: &IdentityRuntime, request: LoginRequest) -> Response {
-    // Checked before anything else touches the store.
-    if request.username.trim().is_empty() || request.password.trim().is_empty() {
-        return invalid_request("Username and password are required.").into_response();
-    }
+/// Identity has no tables: its data-health asks whether `AppDatabase` answers.
+struct AppDatabaseProbe(Arc<AppConfig>);
 
-    let Some(user) = runtime
+#[async_trait::async_trait]
+impl DatabaseProbe for AppDatabaseProbe {
+    async fn can_connect(&self) -> bool {
+        shared_kernel::persistence::can_connect_with(&self.0).await
+    }
+}
+
+/// Port of `AuthHandlers.Login`.
+pub(crate) async fn login(
+    State(identity): Identity,
+    Validated(request): Validated<LoginRequest>,
+) -> Response {
+    let username = request.username.unwrap_or_default();
+    let password = request.password.unwrap_or_default();
+
+    let Some(user) = identity
+        .runtime
         .tokens()
-        .validate_credentials(&request.username, &request.password)
+        .validate_credentials(&username, &password)
     else {
-        tracing::warn!(username = %request.username, "failed login attempt");
+        tracing::warn!("Failed login attempt for user '{username}'");
         // `Results.Unauthorized()` from the handler, so no challenge header —
         // that comes only from the authentication middleware.
         return unauthorized();
     };
 
-    tracing::info!(user_id = %user.user_id, "successful login");
+    tracing::info!("Successful login for user '{}'", user.user_id);
 
-    match runtime.tokens().issue(&user) {
+    match identity.runtime.tokens().issue(&user) {
         Ok(pair) => Json(TokenResponse::from_pair(pair)).into_response(),
         Err(error) => {
             tracing::error!(%error, "could not issue a token");
@@ -238,49 +269,52 @@ fn handle_login(runtime: &IdentityRuntime, request: LoginRequest) -> Response {
     }
 }
 
-fn handle_refresh(runtime: &IdentityRuntime, request: RefreshRequest) -> Response {
-    if request.user_id.trim().is_empty() || request.refresh_token.trim().is_empty() {
-        return invalid_request("UserId and refreshToken are required.").into_response();
-    }
+/// Port of `AuthHandlers.Refresh`.
+pub(crate) async fn refresh(
+    State(identity): Identity,
+    Validated(request): Validated<RefreshRequest>,
+) -> Response {
+    let user_id = request.user_id.unwrap_or_default();
+    let refresh_token = request.refresh_token.unwrap_or_default();
 
-    match runtime
-        .tokens()
-        .refresh(&request.user_id, &request.refresh_token)
-    {
+    match identity.runtime.tokens().refresh(&user_id, &refresh_token) {
         Some(pair) => Json(TokenResponse::from_pair(pair)).into_response(),
         None => {
-            tracing::warn!(user_id = %request.user_id, "failed refresh attempt");
+            tracing::warn!("Failed refresh attempt for user '{user_id}'");
             unauthorized()
         }
     }
 }
 
-fn handle_logout(
-    runtime: &IdentityRuntime,
-    caller: &Authorized<Authenticated>,
-    request: LogoutRequest,
+/// Port of `AuthHandlers.Logout`.
+pub(crate) async fn logout(
+    State(identity): Identity,
+    Caller(caller): Caller,
+    Validated(request): Validated<LogoutRequest>,
 ) -> Result<StatusCode, ApiError> {
+    let user_id = request.user_id.unwrap_or_default();
+
     // A caller may only revoke their own session.
-    if caller.subject != request.user_id {
+    if caller.subject != user_id {
         tracing::warn!(
-            authenticated = %caller.subject,
-            requested = %request.user_id,
-            "logout ownership mismatch"
+            "Logout ownership mismatch: authenticated '{}' tried to revoke tokens for '{user_id}'",
+            caller.subject
         );
         return Err(ApiError::Forbidden);
     }
 
-    runtime
+    identity
+        .runtime
         .tokens()
-        .revoke(&request.user_id, &request.refresh_token);
-    tracing::info!(user_id = %request.user_id, "user logged out");
+        .revoke(&user_id, &request.refresh_token.unwrap_or_default());
+    tracing::info!("User '{user_id}' logged out");
 
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The `userinfo` payload. Lowercase members, from an anonymous object.
+/// The `userinfo` payload. Lowercase members, upstream's `[JsonPropertyName]`s.
 #[derive(Debug, Clone, Serialize)]
-struct UserInfoResponse {
+pub(crate) struct UserInfoResponse {
     sub: String,
     name: Option<String>,
     email: Option<String>,
@@ -288,14 +322,20 @@ struct UserInfoResponse {
     permissions: Vec<String>,
 }
 
-async fn handle_userinfo(caller: Authorized<Authenticated>) -> Json<UserInfoResponse> {
+/// Port of `AuthHandlers.UserInfo`.
+pub(crate) async fn userinfo(Caller(caller): Caller) -> Json<UserInfoResponse> {
     Json(UserInfoResponse {
-        sub: caller.subject.clone(),
-        name: caller.name.clone(),
-        email: caller.email.clone(),
-        roles: caller.roles.clone(),
-        permissions: caller.permissions.clone(),
+        sub: caller.subject,
+        name: caller.name,
+        email: caller.email,
+        roles: caller.roles,
+        permissions: caller.permissions,
     })
+}
+
+/// Port of `AuthHandlers.Jwks`.
+pub(crate) async fn jwks(State(identity): Identity) -> Json<serde_json::Value> {
+    Json(identity.runtime.tokens().jwks())
 }
 
 #[cfg(test)]
@@ -359,8 +399,8 @@ mod tests {
         // The handler warns on a rejected login, and `?request` is the obvious
         // thing to put in that record.
         let request = LoginRequest {
-            username: "demo".to_owned(),
-            password: "hunter2".to_owned(),
+            username: Some("demo".to_owned()),
+            password: Some("hunter2".to_owned()),
         };
 
         let rendered = format!("{request:?}");
@@ -372,12 +412,12 @@ mod tests {
     #[test]
     fn neither_token_body_prints_the_token_it_carries() {
         let refresh = RefreshRequest {
-            user_id: "user-1".to_owned(),
-            refresh_token: "an-opaque-credential".to_owned(),
+            user_id: Some("user-1".to_owned()),
+            refresh_token: Some("an-opaque-credential".to_owned()),
         };
         let logout = LogoutRequest {
-            user_id: "user-1".to_owned(),
-            refresh_token: "an-opaque-credential".to_owned(),
+            user_id: Some("user-1".to_owned()),
+            refresh_token: Some("an-opaque-credential".to_owned()),
         };
         let response = TokenResponse {
             access_token: "header.payload.signature".to_owned(),
@@ -401,16 +441,30 @@ mod tests {
     }
 
     #[test]
-    fn the_invalid_request_problem_matches_the_original() {
-        let problem = invalid_request("Username and password are required.");
-        let document = serde_json::to_value(&problem).unwrap();
+    fn a_blank_field_is_required_under_its_wire_name() {
+        let errors = validate_login(&LoginRequest {
+            username: Some("demo".to_owned()),
+            password: Some("   ".to_owned()),
+        });
 
-        assert_eq!(document["status"], 400);
-        assert_eq!(document["title"], "Invalid request");
-        assert_eq!(document["detail"], "Username and password are required.");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors["password"], ["'password' is required."]);
+
+        let errors = validate_logout(&LogoutRequest {
+            user_id: None,
+            refresh_token: None,
+        });
         assert_eq!(
-            document["type"], "https://tools.ietf.org/html/rfc9110#section-15.5.1",
-            "Results.Problem without a type takes the framework's default"
+            errors.keys().collect::<Vec<_>>(),
+            ["refreshToken", "userId"]
         );
+    }
+
+    #[test]
+    fn bodies_bind_case_insensitively_as_upstreams_do() {
+        let request: LoginRequest =
+            serde_json::from_str(r#"{"Username":"demo","Password":"pw"}"#).unwrap();
+
+        assert_eq!(request.username.as_deref(), Some("demo"));
     }
 }

@@ -1,0 +1,25 @@
+# Local development database. Credentials are for this container only.
+# The API applies migrations and loads data/chinook-postgres-seed.sql on first start in Development.
+# docker/postgres-init creates the read-only 'reporting' login when the volume is first created.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: rust-modular-monolith-postgres
+    environment:
+      POSTGRES_DB: chinook
+      POSTGRES_USER: chinook
+      POSTGRES_PASSWORD: chinook
+    ports:
+      - "5432:5432"
+    volumes:
+      - chinook-data:/var/lib/postgresql/data
+      # Creates the read-only reporting login on first start (ADR-0014).
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chinook -d chinook"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  chinook-data:

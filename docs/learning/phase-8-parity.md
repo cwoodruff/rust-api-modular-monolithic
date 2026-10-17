@@ -1,6 +1,6 @@
 # Phase 8 — Parity verification
 
-*Learning Rust through the port, part 9 of 10.*
+*Learning Rust through the port, part 9 of 11.*
 
 | | |
 |---|---|

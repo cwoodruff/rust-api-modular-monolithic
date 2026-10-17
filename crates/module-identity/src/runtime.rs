@@ -168,15 +168,12 @@ fn build_keys(
 }
 
 fn build_user_store(config: &AppConfig, environment: &Environment) -> Arc<dyn UserStore> {
+    let identity: IdentityOptions = config.section_or_default(IDENTITY_SECTION);
+    crate::diagnostics::report(&identity.in_memory_users, environment);
+
     if !environment.exposes_operational_metadata() {
-        tracing::warn!(
-            environment = environment.name(),
-            "in-memory logins are disabled outside Development and Demo"
-        );
         return Arc::new(DisabledUserStore);
     }
-
-    let identity: IdentityOptions = config.section_or_default(IDENTITY_SECTION);
 
     Arc::new(InMemoryUserStore::from_records(&identity.in_memory_users))
 }

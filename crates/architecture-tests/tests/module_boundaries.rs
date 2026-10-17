@@ -1,7 +1,7 @@
 //! Port of the C# `ModuleBoundaryTests` and `SharedKernelDependencyTests`.
 //!
 //! These read the real dependency graph out of `cargo metadata` rather than
-//! trusting a hand-maintained list, so a stray `shared-data-sqlite` line added
+//! trusting a hand-maintained list, so a stray `module-orders` line added
 //! to a module's `Cargo.toml` fails the build the same way a stray assembly
 //! reference failed the C# build.
 
@@ -13,26 +13,37 @@ use std::process::Command;
 /// The host crate — the composition root, allowed to reference everything.
 const HOST: &str = "api";
 
-/// The test crate itself, which sits outside the layering rules.
-const ARCHITECTURE_TESTS: &str = "architecture-tests";
+/// The test crates, which sit outside the layering rules.
+const TEST_CRATES: [&str; 3] = ["architecture-tests", "module-tests", "test-support"];
+
+/// Port-only: the sample that runs Catalog on its own.
+const SAMPLES: [&str; 1] = ["catalog-host"];
 
 const SHARED_KERNEL: &str = "shared-kernel";
-const SHARED_PERSISTENCE: &str = "shared-persistence";
-const SHARED_DATA_SQLITE: &str = "shared-data-sqlite";
 
-const SHARED_CRATES: [&str; 3] = [SHARED_KERNEL, SHARED_PERSISTENCE, SHARED_DATA_SQLITE];
+/// FluentValidation's counterpart: a library modules use, never the kernel.
+const VALIDATION_RULES: &str = "validation-rules";
 
 const MODULES: [&str; 5] = [
     "module-admin",
+    "module-catalog",
     "module-identity",
-    "module-music",
     "module-orders",
     "module-reporting",
 ];
 
-/// The only workspace crates a module crate may depend on. `shared-data-sqlite`
-/// is deliberately absent: modules see repository *traits*, never a driver.
-const MODULE_ALLOWED_DEPENDENCIES: [&str; 2] = [SHARED_KERNEL, SHARED_PERSISTENCE];
+const CONTRACTS: [&str; 4] = [
+    "administration-contracts",
+    "catalog-contracts",
+    "identity-contracts",
+    "orders-contracts",
+];
+
+/// The only workspace crates a module crate may depend on: the kernel, any
+/// contracts crate, and the rules library.
+fn module_may_depend_on(name: &str) -> bool {
+    name == SHARED_KERNEL || name == VALIDATION_RULES || CONTRACTS.contains(&name)
+}
 
 /// Maps every workspace crate to the set of workspace crates it depends on.
 ///
@@ -104,20 +115,34 @@ fn every_expected_crate_is_a_workspace_member() {
     let graph = workspace_dependency_graph();
 
     let mut expected: BTreeSet<&str> = MODULES.into_iter().collect();
-    expected.extend(SHARED_CRATES);
-    expected.insert(HOST);
-    expected.insert(ARCHITECTURE_TESTS);
+    expected.extend(CONTRACTS);
+    expected.extend(TEST_CRATES);
+    expected.extend(SAMPLES);
+    expected.extend([SHARED_KERNEL, VALIDATION_RULES, HOST]);
 
     let actual: BTreeSet<&str> = graph.keys().map(String::as_str).collect();
 
-    assert_eq!(
-        expected, actual,
-        "the workspace membership drifted from the layout in docs/rust-translation-plan.md"
-    );
+    // Crates still to land in later steps are allowed to be absent; nothing
+    // unexpected is allowed to be present.
+    for name in &actual {
+        assert!(
+            expected.contains(name),
+            "`{name}` is not in the layout docs/upgrade-plan.md describes"
+        );
+    }
+    for name in MODULES
+        .iter()
+        .chain(CONTRACTS.iter())
+        .chain([&SHARED_KERNEL, &HOST])
+    {
+        assert!(
+            actual.contains(name),
+            "`{name}` should be a workspace member"
+        );
+    }
 }
 
-/// Ports `ModuleBoundaryTests`: the C# theory asserted every ordered pair of
-/// module assemblies, so this walks the same 20 pairs.
+/// Ports `Module_Should_Not_Depend_On_Other_Module`: all 20 ordered pairs.
 #[test]
 fn modules_never_depend_on_each_other() {
     let graph = workspace_dependency_graph();
@@ -126,54 +151,48 @@ fn modules_never_depend_on_each_other() {
         let dependencies = dependencies_of(&graph, source);
 
         for target in MODULES {
-            if source == target {
-                continue;
+            if source != target {
+                assert!(
+                    !dependencies.contains(target),
+                    "`{source}` depends on `{target}`; modules talk through contracts and events, never directly"
+                );
             }
-
-            assert!(
-                !dependencies.contains(target),
-                "`{source}` depends on `{target}`; modules must communicate through \
-                 the shared kernel, never directly"
-            );
         }
     }
 }
 
+/// Ports `Module_Should_Only_Depend_On_SharedKernel_And_Framework`.
 #[test]
-fn modules_depend_only_on_the_shared_contracts() {
+fn modules_depend_only_on_the_kernel_and_contracts() {
     let graph = workspace_dependency_graph();
-    let allowed: BTreeSet<&str> = MODULE_ALLOWED_DEPENDENCIES.into_iter().collect();
 
     for module in MODULES {
         for dependency in dependencies_of(&graph, module) {
             assert!(
-                allowed.contains(dependency.as_str()),
-                "`{module}` depends on `{dependency}`, which is outside the allowed set \
-                 {MODULE_ALLOWED_DEPENDENCIES:?}"
+                module_may_depend_on(dependency),
+                "`{module}` depends on `{dependency}`; a module may reference only shared-kernel, \
+                 validation-rules and *-contracts crates"
             );
         }
     }
 }
 
-/// Ports `SharedKernelDependencyTests`: the shared crates are the leaves of the
-/// graph and must never reach back into a module.
+/// Ports `Contracts_Should_Not_Depend_On_Any_Module`: 4 × 5 cases.
 #[test]
-fn shared_crates_never_depend_on_modules() {
+fn contracts_never_depend_on_modules() {
     let graph = workspace_dependency_graph();
 
-    for shared in SHARED_CRATES {
-        let dependencies = dependencies_of(&graph, shared);
-
-        for module in MODULES {
-            assert!(
-                !dependencies.contains(module),
-                "`{shared}` depends on `{module}`; the shared crates must stay \
-                 module-agnostic"
+    for contract in CONTRACTS {
+        for dependency in dependencies_of(&graph, contract) {
+            assert_eq!(
+                dependency, SHARED_KERNEL,
+                "`{contract}` depends on `{dependency}`; contracts reference nothing but the kernel"
             );
         }
     }
 }
 
+/// Ports `SharedKernel_Should_Not_Depend_On_Any_Module_Or_Contracts`.
 #[test]
 fn shared_kernel_is_the_root_of_the_graph() {
     let graph = workspace_dependency_graph();
@@ -184,21 +203,11 @@ fn shared_kernel_is_the_root_of_the_graph() {
     );
 }
 
-/// The database driver is an implementation detail of the host. Modules reach
-/// persistence through the traits in `shared-persistence`.
+/// Ports the fence that SharedKernel references no FluentValidation: the
+/// rules library is the modules' to use.
 #[test]
-fn only_the_host_depends_on_the_sqlite_implementation() {
+fn the_validation_library_depends_on_nothing_in_the_workspace() {
     let graph = workspace_dependency_graph();
 
-    for (crate_name, dependencies) in &graph {
-        if crate_name == HOST || crate_name == SHARED_DATA_SQLITE {
-            continue;
-        }
-
-        assert!(
-            !dependencies.contains(SHARED_DATA_SQLITE),
-            "`{crate_name}` depends on `{SHARED_DATA_SQLITE}`; only `{HOST}` may bind \
-             the concrete database driver"
-        );
-    }
+    assert!(dependencies_of(&graph, VALIDATION_RULES).is_empty());
 }

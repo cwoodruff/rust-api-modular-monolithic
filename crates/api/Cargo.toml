@@ -20,20 +20,16 @@ path = "src/main.rs"
 
 [dependencies]
 shared-kernel = { workspace = true }
-shared-persistence = { workspace = true }
-# The host is the only crate allowed to see a concrete database driver.
-shared-data-sqlite = { workspace = true }
 
 module-admin = { workspace = true }
+module-catalog = { workspace = true }
 module-identity = { workspace = true }
-module-music = { workspace = true }
 module-orders = { workspace = true }
 module-reporting = { workspace = true }
 
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 axum = { workspace = true }
-dashmap = { workspace = true }
-figment = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
@@ -48,3 +44,10 @@ axum-test = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 tower = { workspace = true }
+test-support = { workspace = true }
+identity-contracts = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

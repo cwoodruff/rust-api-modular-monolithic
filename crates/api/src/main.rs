@@ -4,29 +4,25 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use api::{DEFAULT_HTTP_PORT, build, build_identity, build_state, load_config};
+use api::{DEFAULT_HTTP_PORT, HostOptions};
+use shared_kernel::AppConfig;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,tower_http=warn".into()),
+                .unwrap_or_else(|_| "info,tower_http=warn,sqlx=warn".into()),
         )
         .init();
 
     let content_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-    let config = load_config(&content_root)?;
+    let config = AppConfig::load(&content_root).context("failed to load configuration")?;
     let environment = config.environment().clone();
-    let port = config
-        .get_string("Port")
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_HTTP_PORT);
+    let port = config.get_or("Port", DEFAULT_HTTP_PORT);
 
-    let identity = build_identity(&config, &content_root)?;
-    let state = build_state(config, &content_root).await?;
-    let app = build(state, identity);
+    let host = api::build(config, HostOptions::new(&content_root)).await?;
+    let hosted = host.start_hosted_services();
 
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(address)
@@ -35,19 +31,21 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(%address, environment = environment.name(), "listening");
     if environment.exposes_operational_metadata() {
-        tracing::info!("OpenAPI document at http://localhost:{port}/swagger/v1/swagger.json");
+        tracing::info!("Swagger UI at http://localhost:{port}/swagger");
     }
 
-    // `into_make_service_with_connect_info` is what gives the rate limiter a
+    // `into_make_service_with_connect_info` is what gives the rate limiters a
     // client address to partition on.
     axum::serve(
         listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+        host.router()
+            .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
     .context("the server stopped unexpectedly")?;
 
+    hosted.stop().await;
     Ok(())
 }
 

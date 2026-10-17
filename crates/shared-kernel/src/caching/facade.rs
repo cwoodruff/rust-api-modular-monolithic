@@ -27,10 +27,11 @@
 //! lands it slots in behind [`CacheOptions::uses_distributed_tier`].
 
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -40,9 +41,25 @@ use moka::notification::RemovalCause;
 
 use super::key::CacheKey;
 use super::options::{CacheEntryOptions, CacheOptions};
+use crate::diagnostics::ModuleMeter;
 
 /// Maps a tag to the set of cache keys carrying it.
-type TagIndex = Arc<DashMap<String, HashSet<String>>>;
+/// Each tag's keys, with the generation of the entry that registered each.
+///
+/// The generation is what keeps a refill from being forgotten. moka reports
+/// an entry's removal *after* its replacement is in place — on a refill once
+/// it expired, and on every `set` over an existing key — so a listener that
+/// forgot the key outright would drop the new entry's registration and
+/// `remove_by_tag` would stop reaching it. The listener forgets a key only
+/// when the generation still matches the entry being removed.
+type TagIndex = Arc<DashMap<String, HashMap<String, u64>>>;
+
+/// Hands out entry generations, unique for the life of the process.
+static GENERATIONS: AtomicU64 = AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    GENERATIONS.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Why an entry was not stored.
 ///
@@ -68,6 +85,7 @@ struct CachedEntry {
     absolute: Duration,
     sliding: Option<Duration>,
     tags: Arc<[String]>,
+    generation: u64,
 }
 
 /// Applies each entry's own lifetime, since the original sets expiry per entry
@@ -113,6 +131,9 @@ pub struct CacheFacade {
     options: CacheOptions,
     entries: Cache<String, CachedEntry>,
     tags: TagIndex,
+    module: Option<String>,
+    size_limit: Option<u64>,
+    meter: Option<Arc<ModuleMeter>>,
 }
 
 impl std::fmt::Debug for CacheFacade {
@@ -130,16 +151,47 @@ impl CacheFacade {
     /// Builds a facade from the `Caching` configuration section.
     #[must_use]
     pub fn new(options: CacheOptions) -> Self {
+        Self::build(options, None, None, None)
+    }
+
+    /// One module's cache, holding at most `size_limit` entries.
+    ///
+    /// Port of `AddModuleCache(moduleName, sizeLimit)`: every module gets a
+    /// store of its own, every entry counts one toward the limit, and filling
+    /// it never evicts another module's entries (ADR-0013). Where .NET's
+    /// `MemoryCache` refuses a new entry once full, moka evicts an old one
+    /// (F19); either way the module stays within its share.
+    #[must_use]
+    pub fn for_module(
+        options: CacheOptions,
+        module: impl Into<String>,
+        size_limit: u64,
+        meter: Arc<ModuleMeter>,
+    ) -> Self {
+        Self::build(options, Some(module.into()), Some(size_limit), Some(meter))
+    }
+
+    fn build(
+        options: CacheOptions,
+        module: Option<String>,
+        size_limit: Option<u64>,
+        meter: Option<Arc<ModuleMeter>>,
+    ) -> Self {
         let tags: TagIndex = Arc::new(DashMap::new());
         let eviction_tags = Arc::clone(&tags);
 
-        let entries = Cache::builder()
+        let mut builder = Cache::builder();
+        if let Some(limit) = size_limit {
+            builder = builder.max_capacity(limit);
+        }
+
+        let entries = builder
             .expire_after(EntryExpiry)
             // Keeps the tag index from accumulating keys for entries that have
             // already expired or been evicted.
             .eviction_listener(
                 move |key: Arc<String>, entry: CachedEntry, _cause: RemovalCause| {
-                    forget_tags(&eviction_tags, key.as_str(), &entry.tags);
+                    forget_tags(&eviction_tags, key.as_str(), &entry.tags, entry.generation);
                 },
             )
             .build();
@@ -148,7 +200,36 @@ impl CacheFacade {
             options,
             entries,
             tags,
+            module,
+            size_limit,
+            meter,
         }
+    }
+
+    /// The module this cache belongs to, if it is a module's.
+    #[must_use]
+    pub fn module(&self) -> Option<&str> {
+        self.module.as_deref()
+    }
+
+    /// The entry limit, if one was set.
+    #[must_use]
+    pub fn size_limit(&self) -> Option<u64> {
+        self.size_limit
+    }
+
+    /// How many entries the cache holds right now.
+    ///
+    /// Settles moka's pending maintenance first, so the count reflects every
+    /// insert and eviction that has already happened.
+    pub async fn entry_count(&self) -> u64 {
+        self.entries.run_pending_tasks().await;
+        self.entries.entry_count()
+    }
+
+    /// Whether `key` is cached right now.
+    pub async fn contains(&self, key: &CacheKey) -> bool {
+        self.entries.get(&key.to_string()).await.is_some()
     }
 
     /// The configuration this facade was built with.
@@ -224,6 +305,21 @@ impl CacheFacade {
 
         let effective = self.effective(options);
         let cache_key = key.to_string();
+
+        // Hits and misses are counted as upstream counts them: a miss once
+        // per caller before single flight, so coalesced waiters are misses too.
+        if let Some(entry) = self.entries.get(&cache_key).await
+            && let Some(value) = entry.value.downcast_ref::<T>()
+        {
+            if let Some(meter) = &self.meter {
+                meter.cache_hit();
+            }
+            return Ok(Some(value.clone()));
+        }
+        if let Some(meter) = &self.meter {
+            meter.cache_miss();
+        }
+
         let index_key = cache_key.clone();
         let index = Arc::clone(&self.tags);
 
@@ -232,13 +328,15 @@ impl CacheFacade {
             .try_get_with(cache_key, async move {
                 match factory().await {
                     Ok(Some(value)) => {
-                        register_tags(&index, &index_key, &effective.tags);
+                        let generation = next_generation();
+                        register_tags(&index, &index_key, &effective.tags, generation);
 
                         Ok(CachedEntry {
                             value: Arc::new(value),
                             absolute: effective.absolute,
                             sliding: effective.sliding,
                             tags: effective.tags,
+                            generation,
                         })
                     }
                     Ok(None) => Err(NotStored::Missing),
@@ -268,7 +366,8 @@ impl CacheFacade {
         let effective = self.effective(options);
         let cache_key = key.to_string();
 
-        register_tags(&self.tags, &cache_key, &effective.tags);
+        let generation = next_generation();
+        register_tags(&self.tags, &cache_key, &effective.tags, generation);
 
         self.entries
             .insert(
@@ -278,6 +377,7 @@ impl CacheFacade {
                     absolute: effective.absolute,
                     sliding: effective.sliding,
                     tags: effective.tags,
+                    generation,
                 },
             )
             .await;
@@ -298,7 +398,7 @@ impl CacheFacade {
             return;
         };
 
-        for key in keys {
+        for key in keys.into_keys() {
             self.entries.invalidate(&key).await;
         }
     }
@@ -345,23 +445,26 @@ fn apply_jitter(ttl: Duration, jitter_percent: f64) -> Duration {
 }
 
 /// Records that `cache_key` belongs to each of `tags`.
-fn register_tags(index: &TagIndex, cache_key: &str, tags: &[String]) {
+fn register_tags(index: &TagIndex, cache_key: &str, tags: &[String], generation: u64) {
     for tag in tags {
         index
             .entry(tag.clone())
             .or_default()
-            .insert(cache_key.to_owned());
+            .insert(cache_key.to_owned(), generation);
     }
 }
 
 /// Removes `cache_key` from each of `tags`, dropping tags left empty.
-fn forget_tags(index: &TagIndex, cache_key: &str, tags: &[String]) {
+fn forget_tags(index: &TagIndex, cache_key: &str, tags: &[String], generation: u64) {
     for tag in tags {
         let emptied = {
             let Some(mut keys) = index.get_mut(tag) else {
                 continue;
             };
-            keys.remove(cache_key);
+            // A newer entry under the same key owns the registration now.
+            if keys.get(cache_key) == Some(&generation) {
+                keys.remove(cache_key);
+            }
             keys.is_empty()
         };
 
@@ -558,6 +661,52 @@ mod tests {
             .await;
 
         assert_eq!(factory.calls(), 2, "the artist entry should have survived");
+    }
+
+    #[tokio::test]
+    async fn a_key_written_twice_is_still_reached_by_its_tag() {
+        // moka reports the first value's removal after the second is in
+        // place; forgetting the key then would strand the second.
+        let cache = facade();
+        let all = key("all");
+
+        cache.set(&all, 1_i32, Some(album_options())).await;
+        cache.set(&all, 2_i32, Some(album_options())).await;
+        cache.entries.run_pending_tasks().await;
+
+        cache.remove_by_tag("music:album").await;
+
+        assert!(
+            !cache.contains(&all).await,
+            "the second write must still be invalidated"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refill_after_expiry_is_still_reached_by_its_tag() {
+        let cache = facade();
+        let all = key("all");
+        let short = CacheEntryOptions {
+            absolute_expiration_relative_to_now: Some(Duration::from_millis(20)),
+            jitter_percent: 0.0,
+            ..album_options()
+        };
+
+        let _: Option<i32> = cache
+            .get_or_add(&all, || async { Some(1) }, Some(short.clone()))
+            .await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let _: Option<i32> = cache
+            .get_or_add(&all, || async { Some(2) }, Some(album_options()))
+            .await;
+        cache.entries.run_pending_tasks().await;
+
+        cache.remove_by_tag("music:album").await;
+
+        assert!(
+            !cache.contains(&all).await,
+            "the refill must still be invalidated"
+        );
     }
 
     #[tokio::test]

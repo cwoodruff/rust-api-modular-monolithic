@@ -1,6 +1,6 @@
 [package]
 name = "module-reporting"
-description = "Port of Reporting.Module: health endpoints only, as in the original."
+description = "Port of Reporting.Module: cross-module views, integrity findings and the orphan check, in schema reporting."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,8 +12,18 @@ workspace = true
 
 [dependencies]
 shared-kernel = { workspace = true }
-shared-persistence = { workspace = true }
-
+identity-contracts = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
 serde = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true }

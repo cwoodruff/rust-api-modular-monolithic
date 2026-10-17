@@ -1,6 +1,4 @@
-//! The module contract, ported from the C# `IModule` interface.
-//!
-//! The original's contract has three members:
+//! The module contract, ported from `IModule`.
 //!
 //! ```csharp
 //! string Name { get; }
@@ -8,133 +6,383 @@
 //! void MapEndpoints(IEndpointRouteBuilder endpoints);
 //! ```
 //!
-//! Only two survive the port. `RegisterServices` exists to populate a DI
-//! container, and this port has none: the host constructs each module's
-//! services directly and hands them over in the shared state, so there is
-//! nothing for a registration hook to do. What remains is the module's
-//! identity and its routes.
+//! All three members survive. [`Services`] stands where `IServiceCollection`
+//! stands, but it is a typed composition object rather than a container:
+//! a module builds its own services from configuration, keeps them, and
+//! registers with the host only what the host must run or report on — hosted
+//! services, event subscriptions, its database, health checks, its cache, work
+//! queue, gate and meter, its rate-limit policy. Nothing in [`Services`] lets
+//! one module reach another module's services, which is the Rust form of
+//! upstream's "no module service resolves to another module's type"
+//! (ADR-0021).
 //!
-//! [`Module`] is generic over the host's state type rather than naming it,
-//! which keeps this crate at the root of the dependency graph — the state is
-//! assembled from repositories the shared kernel must not know about.
+//! The host keeps an explicit, hand-written module list, as upstream's
+//! `GetModules()` does. No discovery.
 
-use axum::Router;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-/// One module of the monolith: a name, a mount point, and a set of routes.
-pub trait Module<S>: Send + Sync
-where
-    S: Clone + Send + Sync + 'static,
-{
-    /// The module's name, as its health endpoint reports it.
+use crate::AppConfig;
+use crate::auth::{Authenticator, PolicyEvaluator};
+use crate::caching::{self, CacheFacade, CacheKeyComposer, CacheOptions};
+use crate::clock::{self, Clock};
+use crate::concurrency::{self, ModuleGate, ModuleWorkQueue};
+use crate::diagnostics::{DatabaseHealthCheck, HealthCheckRegistration, ModuleMeter};
+use crate::endpoints::Endpoints;
+use crate::environment::Environment;
+use crate::events::dispatcher::DispatcherParts;
+use crate::events::{
+    EventDecoder, EventPublisher, EventSubscriptions, IntegrationEvent, IntegrationEventHandler,
+    ModuleDatabases, OutboxDispatcher, OutboxOptions, Subscription,
+};
+use crate::hosting::HostedService;
+use crate::persistence::ModuleDatabase;
+use crate::traffic_control::RateLimiter;
+
+/// What a module's registration can fail with.
+pub type ModuleError = Box<dyn std::error::Error + Send + Sync>;
+
+/// One module of the monolith. Port of `IModule`.
+pub trait Module: Send + Sync {
+    /// The module's name: `Catalog`, `Orders`, `Administration`, `Identity`, `Reporting`.
     fn name(&self) -> &'static str;
 
-    /// Where the module mounts, such as `/api/music`.
+    /// Builds the module's services and registers what the host needs to know.
     ///
-    /// Written without a trailing slash; [`mount_all`] supplies the separator.
-    fn prefix(&self) -> &'static str;
+    /// # Errors
+    ///
+    /// Configuration the module cannot start with, such as a missing
+    /// connection string.
+    fn register_services(
+        &mut self,
+        services: &mut Services,
+        config: &AppConfig,
+    ) -> Result<(), ModuleError>;
 
-    /// The module's routes, relative to its prefix.
-    fn router(&self) -> Router<S>;
+    /// Maps the module's routes. Runs after every module has registered.
+    fn map_endpoints(&self, endpoints: &mut Endpoints);
 }
 
-/// Nests every module under its own prefix.
-///
-/// Port of the host's `foreach (var module in modules) module.MapEndpoints(app)`.
-///
-/// # Panics
-///
-/// Panics if a module declares a prefix axum cannot nest at, such as `/` or one
-/// ending in a slash. That is a programming error in the module, and failing at
-/// startup beats serving the wrong routes.
-pub fn mount_all<S>(mut router: Router<S>, modules: &[Box<dyn Module<S>>]) -> Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    for module in modules {
-        router = router.nest(module.prefix(), module.router());
-    }
-
-    router
+/// What modules register with the host. Port of `IServiceCollection`, typed.
+pub struct Services {
+    config: Arc<AppConfig>,
+    clock: Arc<dyn Clock>,
+    cache_keys: Arc<CacheKeyComposer>,
+    hosted: Vec<Arc<dyn HostedService>>,
+    subscriptions: EventSubscriptions,
+    databases: ModuleDatabases,
+    health_checks: Vec<HealthCheckRegistration>,
+    meters: BTreeMap<String, Arc<ModuleMeter>>,
+    caches: BTreeMap<String, Arc<CacheFacade>>,
+    work_queues: BTreeMap<String, Arc<ModuleWorkQueue>>,
+    gates: BTreeMap<String, ModuleGate>,
+    rate_limiters: BTreeMap<&'static str, RateLimiter>,
+    authenticator: Option<Arc<dyn Authenticator>>,
+    policies: Option<Arc<dyn PolicyEvaluator>>,
+    dispatchers: Vec<OutboxDispatcher>,
 }
 
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+impl std::fmt::Debug for Services {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Services")
+            .field("hosted", &self.hosted.len())
+            .field("databases", &self.databases)
+            .field("caches", &self.caches.keys().collect::<Vec<_>>())
+            .field("work_queues", &self.work_queues.keys().collect::<Vec<_>>())
+            .field("gates", &self.gates.keys().collect::<Vec<_>>())
+            .field(
+                "rate_limiters",
+                &self.rate_limiters.keys().collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
+}
 
-    use super::*;
-    use axum::routing::get;
-
-    struct TestModule {
-        name: &'static str,
-        prefix: &'static str,
+impl Services {
+    /// An empty collection over `config`, telling time with the system clock.
+    #[must_use]
+    pub fn new(config: Arc<AppConfig>) -> Self {
+        Self::with_clock(config, clock::system())
     }
 
-    impl Module<()> for TestModule {
-        fn name(&self) -> &'static str {
-            self.name
+    /// An empty collection with an explicit clock, for tests.
+    #[must_use]
+    pub fn with_clock(config: Arc<AppConfig>, clock: Arc<dyn Clock>) -> Self {
+        let cache_keys = Arc::new(CacheKeyComposer::new(&config));
+
+        Self {
+            config,
+            clock,
+            cache_keys,
+            hosted: Vec::new(),
+            subscriptions: EventSubscriptions::default(),
+            databases: ModuleDatabases::default(),
+            health_checks: Vec::new(),
+            meters: BTreeMap::new(),
+            caches: BTreeMap::new(),
+            work_queues: BTreeMap::new(),
+            gates: BTreeMap::new(),
+            rate_limiters: BTreeMap::new(),
+            authenticator: None,
+            policies: None,
+            dispatchers: Vec::new(),
+        }
+    }
+
+    /// The configuration.
+    #[must_use]
+    pub fn config(&self) -> &Arc<AppConfig> {
+        &self.config
+    }
+
+    /// The environment the host runs as.
+    #[must_use]
+    pub fn environment(&self) -> &Environment {
+        self.config.environment()
+    }
+
+    /// The clock. Port of `TimeProvider`.
+    #[must_use]
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        Arc::clone(&self.clock)
+    }
+
+    /// The cache-key composer every module shares. Port of `ICacheKeyComposer`.
+    #[must_use]
+    pub fn cache_keys(&self) -> Arc<CacheKeyComposer> {
+        Arc::clone(&self.cache_keys)
+    }
+
+    /// Port of `AddHostedService`.
+    pub fn add_hosted_service(&mut self, service: Arc<dyn HostedService>) {
+        self.hosted.push(service);
+    }
+
+    /// Every hosted service, in registration order.
+    #[must_use]
+    pub fn hosted_services(&self) -> &[Arc<dyn HostedService>] {
+        &self.hosted
+    }
+
+    /// Port of `AddModuleDbContext`: registers the module's database for
+    /// migration, for the dispatcher's inbox lookups, and as a `/healthz` check.
+    pub fn add_module_database(&mut self, database: &ModuleDatabase) {
+        self.databases.add(database.clone());
+        self.health_checks
+            .push(DatabaseHealthCheck::registration(database));
+    }
+
+    /// Every module database, by module name.
+    #[must_use]
+    pub fn databases(&self) -> &ModuleDatabases {
+        &self.databases
+    }
+
+    /// Adds a `/healthz` check.
+    pub fn add_health_check(&mut self, registration: HealthCheckRegistration) {
+        self.health_checks.push(registration);
+    }
+
+    /// Every `/healthz` check, in registration order.
+    #[must_use]
+    pub fn health_checks(&self) -> &[HealthCheckRegistration] {
+        &self.health_checks
+    }
+
+    /// Port of `AddModuleMeter`: the module's meter, created once.
+    pub fn add_module_meter(&mut self, module: &str) -> Arc<ModuleMeter> {
+        Arc::clone(
+            self.meters
+                .entry(module.to_owned())
+                .or_insert_with(|| Arc::new(ModuleMeter::new(module))),
+        )
+    }
+
+    /// Every module meter, by module name.
+    #[must_use]
+    pub fn meters(&self) -> &BTreeMap<String, Arc<ModuleMeter>> {
+        &self.meters
+    }
+
+    /// Port of `AddModuleCache(module, sizeLimit)`: a cache of the module's own.
+    ///
+    /// The limit is read from `Caching:Modules:<module>:SizeLimit`, falling
+    /// back to `default_size_limit`.
+    pub fn add_module_cache(&mut self, module: &str, default_size_limit: u64) -> Arc<CacheFacade> {
+        let options: CacheOptions = self
+            .config
+            .section_or_default(caching::CONFIGURATION_SECTION);
+        let size_limit = self
+            .config
+            .get_or(&caching::size_limit_key(module), default_size_limit)
+            .max(1);
+        let meter = self.add_module_meter(module);
+
+        let cache = Arc::new(CacheFacade::for_module(options, module, size_limit, meter));
+        self.caches.insert(module.to_owned(), Arc::clone(&cache));
+        cache
+    }
+
+    /// Every module cache, by module name.
+    #[must_use]
+    pub fn caches(&self) -> &BTreeMap<String, Arc<CacheFacade>> {
+        &self.caches
+    }
+
+    /// Port of `AddModuleWorkQueue`: a bounded queue of
+    /// `Concurrency:<module>:QueueCapacity` (default 64), started as a hosted
+    /// service, its depth reported on the module's meter.
+    pub fn add_module_work_queue(&mut self, module: &'static str) -> Arc<ModuleWorkQueue> {
+        if let Some(queue) = self.work_queues.get(module) {
+            return Arc::clone(queue);
         }
 
-        fn prefix(&self) -> &'static str {
-            self.prefix
-        }
+        let capacity = self
+            .config
+            .get_or(
+                &format!("Concurrency:{module}:QueueCapacity"),
+                concurrency::DEFAULT_QUEUE_CAPACITY,
+            )
+            .max(1);
+        let queue = Arc::new(ModuleWorkQueue::new(module, capacity));
 
-        fn router(&self) -> Router<()> {
-            Router::new().route("/health", get(|| async { "Healthy" }))
-        }
+        self.add_module_meter(module)
+            .observe_queue_depth(queue.depth_probe());
+        self.hosted.push(Arc::new(Arc::clone(&queue)));
+        self.work_queues
+            .insert(module.to_owned(), Arc::clone(&queue));
+        queue
     }
 
-    fn modules() -> Vec<Box<dyn Module<()>>> {
-        vec![
-            Box::new(TestModule {
-                name: "Administration",
-                prefix: "/api/admin",
-            }),
-            Box::new(TestModule {
-                name: "Identity",
-                prefix: "/api/identity",
-            }),
-            Box::new(TestModule {
-                name: "Music",
-                prefix: "/api/music",
-            }),
-            Box::new(TestModule {
-                name: "Orders",
-                prefix: "/api/orders",
-            }),
-            Box::new(TestModule {
-                name: "Reporting",
-                prefix: "/api/reporting",
-            }),
-        ]
+    /// Every module work queue, by module name.
+    #[must_use]
+    pub fn work_queues(&self) -> &BTreeMap<String, Arc<ModuleWorkQueue>> {
+        &self.work_queues
     }
 
-    #[test]
-    fn the_real_prefixes_all_mount_without_conflicting() {
-        // axum panics on a prefix it cannot nest at — a trailing slash, or `/`.
-        // Mounting all five together also proves none of them collide.
-        let _router = mount_all(Router::new(), &modules());
+    /// Port of `AddModuleGate`: `Concurrency:<module>:MaxConcurrentExpensive`
+    /// (default 4) at once.
+    pub fn add_module_gate(&mut self, module: &'static str) -> ModuleGate {
+        let limit = self
+            .config
+            .get_or(
+                &format!("Concurrency:{module}:MaxConcurrentExpensive"),
+                concurrency::DEFAULT_MAX_CONCURRENT_EXPENSIVE,
+            )
+            .max(1);
+
+        self.gates
+            .entry(module.to_owned())
+            .or_insert_with(|| ModuleGate::new(module, limit))
+            .clone()
     }
 
-    #[test]
-    fn modules_report_their_identity() {
-        let modules = modules();
+    /// Every module gate, by module name.
+    #[must_use]
+    pub fn gates(&self) -> &BTreeMap<String, ModuleGate> {
+        &self.gates
+    }
 
-        let names: Vec<&str> = modules.iter().map(|module| module.name()).collect();
-        let prefixes: Vec<&str> = modules.iter().map(|module| module.prefix()).collect();
+    /// Port of `AddModuleRateLimitPolicy(name)`: the policy's limiter, created
+    /// once, with its limits from `RateLimiting:Policies:<name>`.
+    pub fn add_rate_limit_policy(&mut self, name: &'static str) -> RateLimiter {
+        self.rate_limiters
+            .entry(name)
+            .or_insert_with(|| RateLimiter::from_config(&self.config, name))
+            .clone()
+    }
 
-        assert_eq!(
-            names,
-            ["Administration", "Identity", "Music", "Orders", "Reporting"]
+    /// Every rate-limit policy, by name.
+    #[must_use]
+    pub fn rate_limiters(&self) -> &BTreeMap<&'static str, RateLimiter> {
+        &self.rate_limiters
+    }
+
+    /// Port of `AddIntegrationEventHandler<TEvent, THandler>(moduleKey)`.
+    pub fn add_integration_event_handler<E, H>(&mut self, module_key: &'static str, handler: H)
+    where
+        E: IntegrationEvent,
+        H: IntegrationEventHandler<E>,
+    {
+        self.subscriptions
+            .add(Subscription::new::<E, H>(module_key, handler));
+    }
+
+    /// Every module's subscriptions.
+    #[must_use]
+    pub fn subscriptions(&self) -> &EventSubscriptions {
+        &self.subscriptions
+    }
+
+    /// Port of `AddEventPublisher(module)`: writes into `database`'s outbox.
+    pub fn add_event_publisher(
+        &mut self,
+        module: &str,
+        database: &ModuleDatabase,
+    ) -> EventPublisher {
+        let meter = self.add_module_meter(module);
+        EventPublisher::new(database.schema(), self.clock(), meter)
+    }
+
+    /// Port of `AddOutboxDispatcher<T>(module)`: polls `database`'s outbox for
+    /// `publishes`, through the module's work queue, as a hosted service.
+    pub fn add_outbox_dispatcher(
+        &mut self,
+        name: &str,
+        module: &'static str,
+        database: &ModuleDatabase,
+        publishes: &[EventDecoder],
+    ) -> OutboxDispatcher {
+        let queue = self.add_module_work_queue(module);
+        let meter = self.add_module_meter(module);
+
+        let dispatcher = OutboxDispatcher::new(
+            name,
+            DispatcherParts {
+                database: database.clone(),
+                subscriptions: self.subscriptions.clone(),
+                databases: self.databases.clone(),
+                queue,
+                meter,
+                clock: self.clock(),
+                options: OutboxOptions::from_config(&self.config),
+            },
+            publishes,
         );
-        assert_eq!(
-            prefixes,
-            [
-                "/api/admin",
-                "/api/identity",
-                "/api/music",
-                "/api/orders",
-                "/api/reporting"
-            ]
-        );
+
+        self.hosted.push(Arc::new(dispatcher.clone()));
+        self.dispatchers.push(dispatcher.clone());
+        dispatcher
+    }
+
+    /// Every outbox dispatcher, so a test can run one batch the way upstream's
+    /// calls `ProcessBatchAsync` on the resolved dispatcher.
+    #[must_use]
+    pub fn outbox_dispatchers(&self) -> &[OutboxDispatcher] {
+        &self.dispatchers
+    }
+
+    /// Port of `AddAuthentication` + `AddAuthorization`: how callers are
+    /// identified and how named policies are decided.
+    pub fn add_identity(
+        &mut self,
+        authenticator: Arc<dyn Authenticator>,
+        policies: Arc<dyn PolicyEvaluator>,
+    ) {
+        self.authenticator = Some(authenticator);
+        self.policies = Some(policies);
+    }
+
+    /// The registered authenticator, if a module registered one.
+    #[must_use]
+    pub fn authenticator(&self) -> Option<Arc<dyn Authenticator>> {
+        self.authenticator.clone()
+    }
+
+    /// The registered policy evaluator, if a module registered one.
+    #[must_use]
+    pub fn policies(&self) -> Option<Arc<dyn PolicyEvaluator>> {
+        self.policies.clone()
     }
 }

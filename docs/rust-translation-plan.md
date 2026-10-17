@@ -1,5 +1,16 @@
 # Rust Translation Plan — ASP.NET Core Minimal API Modular Monolith
 
+> **A historical record.** This plan describes the original port, made against
+> upstream commit `344fec3` (2026-09-11): one SQLite database, shared
+> persistence crates, a `Music` module. The original has since been rebuilt on
+> PostgreSQL with a schema per module, contracts crates, an outbox and a
+> Reporting read model, and this port followed it.
+> [upgrade-plan.md](upgrade-plan.md) maps that upgrade and the
+> [ADRs](adr/README.md) record its decisions. The preserve-versus-fix labels
+> below (`P1`–`P18`, `F1`–`F16`, `V1`–`V16`) still stand, and the upgrade plan
+> continues the numbering. Crate names, routes and counts in this file are as
+> they were then.
+
 **Source:** [cwoodruff/aspnetcore-min-api-modular-monolithic](https://github.com/cwoodruff/aspnetcore-min-api-modular-monolithic) (ASP.NET Core 10 Minimal APIs, Chinook SQLite)
 **Target:** this repository — an equivalent Rust solution with the same functions, features, and wire behavior.
 

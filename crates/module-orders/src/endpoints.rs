@@ -1,138 +1,104 @@
-//! The Orders module's routes, ported from its two endpoint classes.
+//! Orders' routes, ported from `Orders.Module/Endpoints`.
 //!
-//! Every data endpoint stacks `orders.read` and `tenant.scoped`; the health
-//! endpoints stay anonymous. Both requirements are carried by the
-//! [`Authorized<OrdersRead>`] each handler takes, so a handler cannot reach the
-//! service layer without them having passed — see the Music module's endpoints
-//! for why that replaced a per-body check.
-//!
-//! Collection routes are registered under both the slashed and unslashed
-//! spellings, for the reason the Music module's endpoints explain.
+//! One group at `/api/orders`, carrying the module's own rate limit and
+//! metrics. Reads require `orders.read` and `tenant.scoped`; finalizing
+//! requires `orders.write` and `tenant.scoped`; the dead-letter routes require
+//! `role.admin` alone. Health and data-health stay anonymous.
 
-use axum::extract::{Path, State};
-use axum::routing::get;
-use axum::{Json, Router};
-use shared_kernel::data::found;
-use shared_kernel::guards::OrdersRead;
-use shared_kernel::{ApiError, Authorized};
-use shared_persistence::AppState;
-use shared_persistence::api_models::{InvoiceApiModel, InvoiceLineApiModel};
+use std::sync::Arc;
 
-use crate::services;
+use identity_contracts::{permissions, policies};
+use shared_kernel::endpoints::Endpoints;
+use shared_kernel::health;
 
-/// What every handler here returns.
-type Answer<T> = Result<Json<T>, ApiError>;
+use crate::{NAME, OrdersState, PREFIX, TAG, handlers};
 
-/// The caller, once both policies have passed.
-type Caller = Authorized<OrdersRead>;
+const READ: &[&str] = &[permissions::ORDERS_READ, policies::TENANT_SCOPED];
+const WRITE: &[&str] = &[permissions::ORDERS_WRITE, policies::TENANT_SCOPED];
+const ADMIN: &[&str] = &[policies::ADMIN];
 
-/// The shape `GET /invoice-lines/{id}` returns.
-///
-/// The C# repository hands back an *entity*, and the service passes it
-/// straight through, so the response carries the entity's navigation
-/// properties — `Invoice` and `Track`, both always null, because nothing
-/// loaded them. The entities in this port are row shapes with no navigation,
-/// so the two members are added back here, which is the only place they exist.
-/// Caught by diffing against the running service.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "PascalCase")]
-struct InvoiceLineEntityResponse {
-    #[serde(flatten)]
-    line: shared_persistence::entities::InvoiceLine,
-    invoice: Option<()>,
-    track: Option<()>,
-}
+/// What a by-id route can answer.
+const BY_ID: &[u16] = &[200, 401, 403, 404, 429];
+/// What a collection route can answer.
+const LIST: &[u16] = &[200, 401, 403, 429];
 
-impl From<shared_persistence::entities::InvoiceLine> for InvoiceLineEntityResponse {
-    fn from(line: shared_persistence::entities::InvoiceLine) -> Self {
-        Self {
-            line,
-            invoice: None,
-            track: None,
-        }
-    }
-}
+pub(crate) fn map(endpoints: &mut Endpoints, state: &Arc<OrdersState>) {
+    let mut group = endpoints.map_group(PREFIX, TAG, Arc::clone(state));
+    group
+        .require_rate_limiting(state.rate_limiter.clone())
+        .add_module_metrics(Arc::clone(&state.meter));
 
-/// Adds a collection route under both the slashed and unslashed spellings.
-fn collection<H, T>(router: Router<AppState>, path: &str, handler: H) -> Router<AppState>
-where
-    H: axum::handler::Handler<T, AppState> + Clone,
-    T: 'static,
-{
-    router
-        .route(path, get(handler.clone()))
-        .route(&format!("{path}/"), get(handler))
-}
+    health::map_health_endpoints(&mut group, NAME, Arc::new(state.database.clone()));
 
-/// The Orders module's routes.
-pub(crate) fn routes() -> Router<AppState> {
-    let router = Router::new()
-        .route("/invoices/{id}", get(invoice_by_id))
-        .route("/invoices/customer/{id}", get(invoices_by_customer))
-        .route("/invoice-lines/{id}", get(invoice_line_by_id))
-        .route("/invoice-lines/invoice/{id}", get(invoice_lines_by_invoice))
-        .route("/invoice-lines/track/{id}", get(invoice_lines_by_track));
+    // Invoices
+    group
+        .map_get("/invoices/{id:int}", handlers::get_invoice_by_id)
+        .with_name("OrdersGetInvoiceById")
+        .require_authorization(READ)
+        .produces(BY_ID);
+    group
+        .map_get("/invoices/", handlers::get_all_invoices)
+        .with_name("GetAllInvoices")
+        .require_authorization(READ)
+        .produces(LIST);
+    group
+        .map_get(
+            "/invoices/customer/{id:int}",
+            handlers::get_invoices_by_customer_id,
+        )
+        .with_name("GetInvoicesByCustomerId")
+        .require_authorization(READ)
+        .produces(LIST);
+    group
+        .map_post("/invoices/{id:int}/finalize", handlers::finalize_invoice)
+        .with_name("OrdersFinalizeInvoice")
+        .with_description(
+            "Finalizes a draft invoice and publishes InvoiceFinalized through the orders outbox in the same transaction. Returns 202: the invoice is final now, but track sales and the customer's purchase summary are updated eventually, after the outbox is dispatched (salesCountersUpdate: \"eventual\"). Do not read them back expecting this invoice to be counted yet.",
+        )
+        .require_authorization(WRITE)
+        .produces(&[202, 401, 403, 404, 409, 429]);
 
-    let router = collection(router, "/invoices", all_invoices);
+    // Invoice lines
+    group
+        .map_get("/invoice-lines/{id:int}", handlers::get_invoice_line_by_id)
+        .with_name("OrdersGetInvoiceLineById")
+        .require_authorization(READ)
+        .produces(BY_ID);
+    group
+        .map_get("/invoice-lines/", handlers::get_all_invoice_lines)
+        .with_name("GetAllInvoiceLines")
+        .require_authorization(READ)
+        .produces(LIST);
+    group
+        .map_get(
+            "/invoice-lines/invoice/{id:int}",
+            handlers::get_invoice_lines_by_invoice_id,
+        )
+        .with_name("GetInvoiceLinesByInvoiceId")
+        .require_authorization(READ)
+        .produces(LIST);
+    group
+        .map_get(
+            "/invoice-lines/track/{id:int}",
+            handlers::get_invoice_lines_by_track_id,
+        )
+        .with_name("GetInvoiceLinesByTrackId")
+        .require_authorization(READ)
+        .produces(LIST);
 
-    collection(router, "/invoice-lines", all_invoice_lines)
-}
-
-async fn invoice_by_id(
-    _caller: Caller,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<InvoiceApiModel> {
-    found(services::invoice_by_id(&state, id).await?)
-}
-
-async fn all_invoices(
-    _caller: Caller,
-    State(state): State<AppState>,
-) -> Answer<Vec<InvoiceApiModel>> {
-    Ok(Json(services::all_invoices(&state).await?))
-}
-
-async fn invoices_by_customer(
-    _caller: Caller,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<Vec<InvoiceApiModel>> {
-    Ok(Json(services::invoices_by_customer(&state, id).await?))
-}
-
-/// The one endpoint that serves an entity shape rather than an API model.
-async fn invoice_line_by_id(
-    _caller: Caller,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<InvoiceLineEntityResponse> {
-    found(
-        services::invoice_line_by_id(&state, id)
-            .await?
-            .map(InvoiceLineEntityResponse::from),
-    )
-}
-
-async fn all_invoice_lines(
-    _caller: Caller,
-    State(state): State<AppState>,
-) -> Answer<Vec<InvoiceLineApiModel>> {
-    Ok(Json(services::all_invoice_lines(&state).await?))
-}
-
-async fn invoice_lines_by_invoice(
-    _caller: Caller,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<Vec<InvoiceLineApiModel>> {
-    Ok(Json(services::invoice_lines_by_invoice(&state, id).await?))
-}
-
-async fn invoice_lines_by_track(
-    _caller: Caller,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<Vec<InvoiceLineApiModel>> {
-    Ok(Json(services::invoice_lines_by_track(&state, id).await?))
+    // Outbox
+    group
+        .map_get("/outbox/dead-letters", handlers::list_dead_letters)
+        .with_name("OrdersListDeadLetters")
+        .with_description(
+            "Outbox messages whose delivery failed six times. Each stays here until retried.",
+        )
+        .require_authorization(ADMIN)
+        .produces(LIST);
+    group
+        .map_post("/outbox/dead-letters/{id:guid}/retry", handlers::retry_dead_letter)
+        .with_name("OrdersRetryDeadLetter")
+        .with_description("Resets the attempt count so the dispatcher delivers the message again on its next poll.")
+        .require_authorization(ADMIN)
+        .produces(&[204, 401, 403, 404, 429]);
 }

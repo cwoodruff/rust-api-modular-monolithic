@@ -1,234 +1,139 @@
-//! The Administration module's routes, ported from its five endpoint classes.
+//! Administration's routes, ported from `Admin.Module/Endpoints`.
 //!
-//! This is the one module that stacks **three** policies. Reads require
-//! `role.admin`, `administration.read` and `tenant.scoped`; writes swap the
-//! second for `administration.write`. All three must pass, and which set a
-//! route carries is visible in its handler's signature — [`Reader`] or
-//! [`Writer`] — rather than in a call at the top of the body that a new
-//! endpoint could be written without.
-//!
-//! It also carries the only writes in the application. Nine other services
-//! expose create and update methods that no route reaches.
+//! One group at `/api/admin`, with the module's own rate limit and metrics.
+//! Reads stack three policies — `role.admin`, `administration.read`,
+//! `tenant.scoped` — and writes the same with `administration.write`.
 
-use axum::extract::{Path, State};
-use axum::http::{HeaderName, StatusCode, header};
-use axum::routing::{get, post, put};
-use axum::{Json, Router};
-use serde::Deserialize;
-use shared_kernel::data::found;
-use shared_kernel::guards::{AdministrationRead, AdministrationWrite};
-use shared_kernel::{ApiError, Authorized, JsonBody};
-use shared_persistence::AppState;
-use shared_persistence::api_models::{
-    CustomerApiModel, EmployeeApiModel, GenreApiModel, MediaTypeApiModel,
-};
+use std::sync::Arc;
 
-use crate::services;
+use identity_contracts::{permissions, policies};
+use shared_kernel::endpoints::Endpoints;
+use shared_kernel::health;
 
-/// What a handler serving a body returns.
-type Answer<T> = Result<Json<T>, ApiError>;
+use crate::validation::{CreateGenreRequestValidator, UpdateGenreRequestValidator};
+use crate::{AdministrationState, NAME, PREFIX, TAG, handlers};
 
-/// A caller who has passed the three read policies.
-type Reader = Authorized<AdministrationRead>;
+/// Port of `RequireAdministrationReadAccess()`.
+const READ: &[&str] = &[
+    policies::ADMIN,
+    permissions::ADMINISTRATION_READ,
+    policies::TENANT_SCOPED,
+];
+/// Port of `RequireAdministrationWriteAccess()`.
+const WRITE: &[&str] = &[
+    policies::ADMIN,
+    permissions::ADMINISTRATION_WRITE,
+    policies::TENANT_SCOPED,
+];
 
-/// A caller who has passed the three write policies.
-type Writer = Authorized<AdministrationWrite>;
+const BY_ID: &[u16] = &[200, 401, 403, 404, 429];
+const LIST: &[u16] = &[200, 401, 403, 429];
 
-/// Adds a collection route under both the slashed and unslashed spellings.
-fn collection<H, T>(router: Router<AppState>, path: &str, handler: H) -> Router<AppState>
-where
-    H: axum::handler::Handler<T, AppState> + Clone,
-    T: 'static,
-{
-    router
-        .route(path, get(handler.clone()))
-        .route(&format!("{path}/"), get(handler))
-}
+pub(crate) fn map(endpoints: &mut Endpoints, state: &Arc<AdministrationState>) {
+    let mut group = endpoints.map_group(PREFIX, TAG, Arc::clone(state));
+    group
+        .require_rate_limiting(state.rate_limiter.clone())
+        .add_module_metrics(Arc::clone(&state.meter));
 
-/// The Administration module's routes.
-pub(crate) fn routes() -> Router<AppState> {
-    let router = Router::new()
-        .route("/customers/{id}", get(customer_by_id))
-        .route("/customers/support-rep/{id}", get(customers_by_support_rep))
-        .route("/employees/{id}", get(employee_by_id))
-        .route("/employees/{id}/direct-reports", get(direct_reports))
-        .route("/employees/{id}/reports-to", get(reports_to))
-        .route("/media-types/{id}", get(media_type_by_id))
-        .route("/genres/{id}", get(genre_by_id))
-        // The write surface.
-        .route("/genres", post(create_genre))
-        .route("/genres/{id}", put(update_genre).delete(delete_genre));
+    health::map_health_endpoints(&mut group, NAME, Arc::new(state.database.clone()));
 
-    let router = collection(router, "/customers", all_customers);
-    let router = collection(router, "/employees", all_employees);
-    let router = collection(router, "/media-types", all_media_types);
+    // Customers
+    group
+        .map_get("/customers/{id:int}", handlers::get_customer_by_id)
+        .with_name("AdministrationGetCustomerById")
+        .require_authorization(READ)
+        .produces(BY_ID);
+    group
+        .map_get("/customers/{id:int}/purchases", handlers::get_customer_purchases)
+        .with_name("AdministrationGetCustomerPurchases")
+        .with_description(
+            "Total spent and invoice count, summed from InvoiceFinalized events. Eventually consistent: an invoice finalized moments ago may not be counted yet.",
+        )
+        .require_authorization(READ)
+        .produces(BY_ID);
+    group
+        .map_get("/customers/", handlers::get_all_customers)
+        .with_name("GetAllCustomers")
+        .require_authorization(READ)
+        .produces(LIST);
+    group
+        .map_get(
+            "/customers/support-rep/{id:int}",
+            handlers::get_customers_by_support_rep_id,
+        )
+        .with_name("GetCustomersBySupportRepId")
+        .require_authorization(READ)
+        .produces(LIST);
 
-    collection(router, "/genres", all_genres)
-}
+    // Employees
+    group
+        .map_get("/employees/{id:int}", handlers::get_employee_by_id)
+        .with_name("AdministrationGetEmployeeById")
+        .require_authorization(READ)
+        .produces(BY_ID);
+    group
+        .map_get("/employees/", handlers::get_all_employees)
+        .with_name("GetAllEmployees")
+        .require_authorization(READ)
+        .produces(LIST);
+    group
+        .map_get(
+            "/employees/{id:int}/direct-reports",
+            handlers::get_employee_direct_reports,
+        )
+        .with_name("GetEmployeeDirectReports")
+        .require_authorization(READ)
+        .produces(LIST);
+    group
+        .map_get(
+            "/employees/{id:int}/reports-to",
+            handlers::get_employee_reports_to,
+        )
+        .with_name("GetEmployeeReportsTo")
+        .with_description(
+            "The employee's manager. 404 when the employee does not exist or reports to no one.",
+        )
+        .require_authorization(READ)
+        .produces(BY_ID);
 
-// ---------------------------------------------------------------------------
-// Customers
-// ---------------------------------------------------------------------------
+    // Genres
+    group
+        .map_get("/genres/{id:int}", handlers::get_genre_by_id)
+        .with_name("AdministrationGetGenreById")
+        .require_authorization(READ)
+        .produces(BY_ID);
+    group
+        .map_get("/genres/", handlers::get_all_genres)
+        .with_name("GetAllGenres")
+        .require_authorization(READ)
+        .produces(LIST);
+    group
+        .map_post("/genres", handlers::create_genre)
+        .with_name("CreateGenre")
+        .require_authorization(WRITE)
+        .with_validation::<crate::models::CreateGenreRequest>(Arc::new(CreateGenreRequestValidator))
+        .produces(&[201, 400, 401, 403, 429]);
+    group
+        .map_put("/genres/{id:int}", handlers::update_genre)
+        .with_name("UpdateGenre")
+        .require_authorization(WRITE)
+        .with_validation::<crate::models::UpdateGenreRequest>(Arc::new(UpdateGenreRequestValidator))
+        .produces(&[200, 400, 401, 403, 404, 429]);
+    group
+        .map_delete("/genres/{id:int}", handlers::delete_genre)
+        .with_name("DeleteGenre")
+        .require_authorization(WRITE)
+        .produces(&[204, 401, 403, 404, 429]);
 
-async fn customer_by_id(
-    _caller: Reader,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<CustomerApiModel> {
-    found(services::customer_by_id(&state, id).await?)
-}
-
-async fn all_customers(
-    _caller: Reader,
-    State(state): State<AppState>,
-) -> Answer<Vec<CustomerApiModel>> {
-    Ok(Json(services::all_customers(&state).await?))
-}
-
-async fn customers_by_support_rep(
-    _caller: Reader,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<Vec<CustomerApiModel>> {
-    Ok(Json(services::customers_by_support_rep(&state, id).await?))
-}
-
-// ---------------------------------------------------------------------------
-// Employees
-// ---------------------------------------------------------------------------
-
-async fn employee_by_id(
-    _caller: Reader,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<EmployeeApiModel> {
-    found(services::employee_by_id(&state, id).await?)
-}
-
-async fn all_employees(
-    _caller: Reader,
-    State(state): State<AppState>,
-) -> Answer<Vec<EmployeeApiModel>> {
-    Ok(Json(services::all_employees(&state).await?))
-}
-
-async fn direct_reports(
-    _caller: Reader,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<Vec<EmployeeApiModel>> {
-    Ok(Json(services::direct_reports(&state, id).await?))
-}
-
-async fn reports_to(
-    _caller: Reader,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<EmployeeApiModel> {
-    found(services::reports_to(&state, id).await?)
-}
-
-// ---------------------------------------------------------------------------
-// Media types
-// ---------------------------------------------------------------------------
-
-async fn media_type_by_id(
-    _caller: Reader,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<MediaTypeApiModel> {
-    found(services::media_type_by_id(&state, id).await?)
-}
-
-async fn all_media_types(
-    _caller: Reader,
-    State(state): State<AppState>,
-) -> Answer<Vec<MediaTypeApiModel>> {
-    Ok(Json(services::all_media_types(&state).await?))
-}
-
-// ---------------------------------------------------------------------------
-// Genres
-// ---------------------------------------------------------------------------
-
-/// The body both write endpoints take.
-///
-/// The C# records declare `string Name`, and the host leaves the naming policy
-/// alone but keeps the web defaults' case-insensitive matching, so `Name` and
-/// `name` both bind. The `[Required]` and `[StringLength]` attributes on those
-/// records are decorative — Minimal APIs do not run data annotations, and the
-/// real enforcement is the FluentValidation rule inside the service.
-#[derive(Debug, Clone, Deserialize)]
-struct GenreRequest {
-    #[serde(alias = "name")]
-    #[serde(rename = "Name")]
-    name: Option<String>,
-}
-
-/// The lowercase echo `PUT` answers with.
-///
-/// Note the casing against the `POST`, which answers a PascalCase model: one
-/// comes from an anonymous object and the other from an API model, and the
-/// host's naming policy leaves both alone.
-#[derive(Debug, Clone, serde::Serialize)]
-struct GenreEcho {
-    id: i32,
-    name: Option<String>,
-}
-
-async fn genre_by_id(
-    _caller: Reader,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Answer<GenreApiModel> {
-    found(services::genre_by_id(&state, id).await?)
-}
-
-async fn all_genres(_caller: Reader, State(state): State<AppState>) -> Answer<Vec<GenreApiModel>> {
-    Ok(Json(services::all_genres(&state).await?))
-}
-
-/// `POST /api/admin/genres` — 201 with a `Location` header and the new model.
-async fn create_genre(
-    _caller: Writer,
-    State(state): State<AppState>,
-    JsonBody(request): JsonBody<GenreRequest>,
-) -> Result<(StatusCode, [(HeaderName, String); 1], Json<GenreApiModel>), ApiError> {
-    let created = services::create_genre(&state, request.name).await?;
-    let location = format!("/api/admin/genres/{}", created.id);
-
-    Ok((
-        StatusCode::CREATED,
-        [(header::LOCATION, location)],
-        Json(created),
-    ))
-}
-
-/// `PUT /api/admin/genres/{id}` — 200 with a lowercase echo of the change.
-async fn update_genre(
-    _caller: Writer,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-    JsonBody(request): JsonBody<GenreRequest>,
-) -> Answer<GenreEcho> {
-    let name = request.name.clone();
-
-    if services::update_genre(&state, id, request.name).await? {
-        Ok(Json(GenreEcho { id, name }))
-    } else {
-        Err(ApiError::NotFound)
-    }
-}
-
-/// `DELETE /api/admin/genres/{id}` — 204, or 404 when there is nothing to drop.
-async fn delete_genre(
-    _caller: Writer,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Result<StatusCode, ApiError> {
-    if services::delete_genre(&state, id).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::NotFound)
-    }
+    // Media types
+    group
+        .map_get("/media-types/{id:int}", handlers::get_media_type_by_id)
+        .with_name("AdministrationGetMediaTypeById")
+        .require_authorization(READ)
+        .produces(BY_ID);
+    group
+        .map_get("/media-types/", handlers::get_all_media_types)
+        .with_name("GetAllMediaTypes")
+        .require_authorization(READ)
+        .produces(LIST);
 }

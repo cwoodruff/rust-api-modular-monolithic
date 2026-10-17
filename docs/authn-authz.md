@@ -83,12 +83,25 @@ export Identity__InMemoryUsers__0__Password=secret
 export Identity__InMemoryUsers__0__UserId=user-1
 export Identity__InMemoryUsers__0__Tenant=tenant-1
 export Identity__InMemoryUsers__0__Roles__0=User
-export Identity__InMemoryUsers__0__Permissions__0=music.read
+export Identity__InMemoryUsers__0__Permissions__0=catalog.read
 ```
+
+In Development and Demo the host also reads user secrets, from the original's
+`UserSecretsId`, so `dotnet user-secrets --project src/ModularMonolith.Api set
+"Identity:InMemoryUsers:0:Username" demo` run in the original's checkout seeds
+this host too. `USER_SECRETS_PATH` points at another `secrets.json`. Secrets
+load after the JSON files and before environment variables, as upstream's
+host loads them (4ad3c91).
 
 Passwords are compared in plain text. Usernames match case-insensitively.
 Entries missing a username, password or user id are dropped with a warning
 rather than failing startup. All four behaviors are the original's.
+
+At startup the module logs what it loaded, with the original's messages and
+event ids (2001 to 2008): one line per usable login with its password length
+and never the password, one warning per unusable entry naming its index and
+missing fields, and a warning when a password looks like a pasted shell
+command (`contains command text ('user-secrets')`) or contains whitespace.
 
 ## Keys
 
@@ -133,32 +146,68 @@ is published, with no rotation overlap.
 
 ## Policies
 
-Ten of them. Eight are permission checks, which are just the permission string:
+Ten names, all constants in `identity-contracts` (ADR-0011). Eight are
+permissions, each also the name of the policy that requires it:
 
-`music.read`, `music.write`, `orders.read`, `orders.write`,
+`catalog.read`, `catalog.write`, `orders.read`, `orders.write`,
 `admin.users.manage`, `administration.read`, `administration.write`,
 `report.view`
 
-plus `role.admin` and `tenant.scoped`.
+plus `role.admin` (the `Admin` role) and `tenant.scoped`.
 
-**Four reach no endpoint** — `music.write`, `orders.write`,
-`admin.users.manage` and `report.view` — and are kept unused here for the same
-reason the original keeps them: the documentation refers to them.
+`catalog.read` and `catalog.write` were `music.read` and `music.write` before
+the original renamed the module. A token carrying `music.read` no longer
+reads Catalog. `catalog.write` and `admin.users.manage` reach no endpoint.
 
-There is **no global fallback policy**. An endpoint is anonymous unless it opts
-in, which is why every health endpoint is reachable without a token even inside
-otherwise protected modules.
+An endpoint lists the names it requires, and all must pass:
 
-Requirements stack, and all must pass:
+```rust
+.require_authorization(&[permissions::CATALOG_READ, policies::TENANT_SCOPED])
+```
+
+Identity registers a `PolicyRegistry` with the host, and the authorization
+layer asks it about each name at request time. This replaced the port's
+earlier `Authorized<P>` extractor, whose policies were types checked at
+compile time (ADR-0021): a name evaluated at request time can be wrong, so it
+is checked twice before a request arrives. The guardrail tests fail on a name
+that is not an `identity-contracts` constant or that the registry does not
+know, and the host refuses to start in Development and Test with
+`Endpoint validation failed:` and a line per problem. A name unknown at
+request time anyway answers 500.
+
+A handler that needs the caller takes a `Caller` extractor. The
+authorization layer has already run by then; a handler on an endpoint mapped
+without `require_authorization` gets a 401 from `Caller` rather than serving
+data to nobody in particular.
+
+There is **no global fallback policy**. An endpoint is anonymous unless it
+opts in, which is why every health endpoint is reachable without a token even
+inside otherwise protected modules. The guardrail tests name every anonymous
+endpoint with the reason it may be, so a new one fails until it is justified.
 
 | Endpoints | Requirements |
 |---|---|
-| Music data | `music.read` + `tenant.scoped` |
+| Catalog data, track sales | `catalog.read` + `tenant.scoped` |
 | Orders data | `orders.read` + `tenant.scoped` |
-| Administration reads | `role.admin` + `administration.read` + `tenant.scoped` |
+| Finalize an invoice | `orders.write` + `tenant.scoped` |
+| Dead letters, list and retry | `role.admin` |
+| Administration reads, customer purchases | `role.admin` + `administration.read` + `tenant.scoped` |
 | Administration writes | `role.admin` + `administration.write` + `tenant.scoped` |
+| Sales by genre, invoice lines with names | `report.view` + `tenant.scoped` |
+| Integrity run and findings | `role.admin` |
 | `logout`, `userinfo` | authenticated |
-| health, data-health, root, login, refresh, JWKS | anonymous |
+| health, data-health, root, `/healthz`, login, refresh, JWKS | anonymous |
+
+## Request bodies
+
+Login, refresh and logout validate their bodies before the handler runs
+(18f7f86). Every field is required, and a blank or missing one is a 400 with
+the original's validation body: title `Request validation failed.`, and
+`errors` keyed by wire name, such as `{"password":["'password' is
+required."]}`. Logout with a blank field is therefore a 400 now, where it was
+a 403 or a 204 before. Authentication runs first, so an anonymous logout is
+still a 401. Bodies bind case-insensitively, as the original's do:
+`{"Username": …}` works.
 
 ## The tenant guard, which surprises people
 
@@ -193,3 +242,16 @@ Both appear, and which one you get is not arbitrary:
 
 That distinction was found by diffing headers against the running service; it
 is easy to get wrong in a way no body comparison would catch.
+
+## Outside the monolith: `catalog-host`
+
+`samples/catalog-host` serves Catalog alone and validates Identity's tokens
+without depending on `module-identity` (ADR-0020). It fetches the key set
+from `CatalogHost:IdentityJwksUrl` with `reqwest`, caches it, refreshes it
+every 24 hours or at most every five minutes when a token names an unknown
+`kid`, and checks issuer, audience, lifetime with 30 seconds of leeway, and
+the `typ` header. Its policies are its own copy of Identity's rules, reading
+the same `identity-contracts` arrays and the same tenant rule from the
+kernel's `Principal`. The module test host carries a third copy over
+`X-Test-*` headers. Upstream has the same three copies; here the tenant rule
+itself is one function all three call.

@@ -1,6 +1,6 @@
 # Learning Rust through the port
 
-Ten documents, one per delivery phase of the ASP.NET Core → Rust port, each
+Eleven documents, one per delivery phase of the ASP.NET Core → Rust port, each
 written as a Rust lesson anchored in the code that phase produced. They assume
 you know C# and ASP.NET Core well and Rust not at all, and they teach Rust in
 the order this codebase needed it.
@@ -31,6 +31,11 @@ trait objects from Phase 1 are assumed by Phase 5, and so on.
 | 7 | [Administration](phase-7-administration.md) | `FromRequest` body extractors, newtypes, layered error enums with `From`, tuple responses with headers, `serde(alias)`, `Result<bool, E>`, a source-scanning test |
 | 8 | [Parity verification](phase-8-parity.md) | The harness, four precise wire fixes, `&'static str` tables, and why tests that assert your implementation cannot find these bugs |
 | 9 | [Ops and docs](phase-9-ops-docs.md) | Release profiles, Docker dependency caching, `--locked`, linking, fail-fast startup, rustdoc conventions, `cargo doc` |
+| 10 | [Following the original's upgrade](phase-10-the-upgrade.md) | A typed composition object instead of DI, builders that finish on `Drop`, endpoint metadata, named policies versus policy types, outbox and inbox over sqlx transactions, `for<'c>` closures, `Any` downcasts, bounded `mpsc` work queues, `sqlx::migrate!` per crate, `OnceLock` fixtures across tokio runtimes, a shared test container with template cloning |
+
+Phases 0 to 9 describe the first port, made against the original's SQLite
+shape; their crate names (`module-music`, `shared-persistence`) and commits are
+as they were then. Phase 10 describes the upgrade that replaced that shape.
 
 ## How to use these alongside the code
 
@@ -52,6 +57,6 @@ trait objects from Phase 1 are assumed by Phase 5, and so on.
   `rust-toolchain.toml` selects the stable channel and `rustup` installs it on
   first `cargo` invocation; `Cargo.toml` declares 1.88 as the minimum because
   the code uses 2024-edition let chains).
-- `jq`, `curl`, and `sqlite3` for a few exercises.
-- Docker for Phase 9's exercises; the .NET 10 SDK only for running the
-  parity harness in Phase 8.
+- `jq`, `curl`, and `sqlite3` for a few exercises in the early phases.
+- Docker for Phase 9's and Phase 10's exercises, and for the database test
+  suites; the .NET 10 SDK only for running the parity harness in Phase 8.

@@ -72,6 +72,26 @@ impl Environment {
         matches!(self, Self::Development)
     }
 
+    /// Whether this is the `Test` environment upstream's test hosts run as.
+    #[must_use]
+    pub fn is_test(&self) -> bool {
+        self.name().eq_ignore_ascii_case("Test")
+    }
+
+    /// Whether the host migrates and seeds on startup: Development, Test and
+    /// Demo, as upstream's `DbSeeder` gate reads.
+    #[must_use]
+    pub fn migrates_on_startup(&self) -> bool {
+        self.is_development() || self.is_test() || matches!(self, Self::Demo)
+    }
+
+    /// Whether the host refuses to start on an endpoint problem: Development
+    /// and Test, as upstream's `ValidateEndpoints` gate reads.
+    #[must_use]
+    pub fn validates_endpoints(&self) -> bool {
+        self.is_development() || self.is_test()
+    }
+
     /// Port of `BuildInfoProvider.ShouldExposeOperationalMetadata`.
     ///
     /// Gates Swagger, the version and service fields on the root and health
