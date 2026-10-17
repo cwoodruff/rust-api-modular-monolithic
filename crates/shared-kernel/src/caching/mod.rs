@@ -15,41 +15,8 @@ pub use options::{CacheEntryOptions, CacheOptions};
 /// The configuration section the cache binds, matching the original.
 pub const CONFIGURATION_SECTION: &str = "Caching";
 
-/// Tag names each service invalidates after a write.
-///
-/// The original declares two tags per entity but only ever passes the first to
-/// `RemoveByTagAsync`, so the `:by-id` variants are recorded and never used as
-/// invalidation targets. They are listed here for fidelity.
-pub mod tags {
-    /// Tags for the Music module's entities.
-    pub mod music {
-        /// Album entries.
-        pub const ALBUM: &str = "music:album";
-        /// Artist entries.
-        pub const ARTIST: &str = "music:artist";
-        /// Track entries.
-        pub const TRACK: &str = "music:track";
-        /// Playlist entries.
-        pub const PLAYLIST: &str = "music:playlist";
-    }
-
-    /// Tags for the Orders module's entities.
-    pub mod orders {
-        /// Invoice entries.
-        pub const INVOICE: &str = "orders:invoice";
-        /// Invoice line entries.
-        pub const INVOICE_LINE: &str = "orders:invoiceline";
-    }
-
-    /// Tags for the Administration module's entities.
-    pub mod administration {
-        /// Customer entries.
-        pub const CUSTOMER: &str = "administration:customer";
-        /// Employee entries.
-        pub const EMPLOYEE: &str = "administration:employee";
-        /// Genre entries.
-        pub const GENRE: &str = "administration:genre";
-        /// Media type entries.
-        pub const MEDIA_TYPE: &str = "administration:mediatype";
-    }
+/// Where a module's entry limit is read: `Caching:Modules:<Module>:SizeLimit`.
+#[must_use]
+pub fn size_limit_key(module: &str) -> String {
+    format!("{CONFIGURATION_SECTION}:Modules:{module}:SizeLimit")
 }

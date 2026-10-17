@@ -19,7 +19,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
-use crate::data::RepositoryError;
+use crate::data::DataError;
 use crate::json::MalformedRequest;
 
 /// The `type` the original uses for client errors (RFC 9110 §15.5.1).
@@ -357,8 +357,14 @@ pub enum ApiError {
     /// The host could not read the request body.
     Malformed(MalformedRequest),
 
+    /// The request conflicts with the resource's state: 409, from the defaults table.
+    Conflict,
+
     /// The database refused: 500, leaking nothing about the cause.
-    Repository(RepositoryError),
+    Data(DataError),
+
+    /// Something the server got wrong: 500, leaking nothing.
+    Internal,
 }
 
 impl ApiError {
@@ -373,7 +379,9 @@ impl ApiError {
             Self::NotFound => status_code_page(StatusCode::NOT_FOUND, trace_id),
             Self::Validation(errors) => ProblemDetails::validation(errors, trace_id),
             Self::Malformed(malformed) => malformed.into_problem_with(trace_id),
-            Self::Repository(error) => error.into_problem(trace_id),
+            Self::Conflict => status_code_page(StatusCode::CONFLICT, trace_id),
+            Self::Data(error) => error.into_problem(trace_id),
+            Self::Internal => ProblemDetails::internal_server_error(trace_id),
         }
     }
 }
@@ -386,7 +394,9 @@ impl std::fmt::Display for ApiError {
             Self::NotFound => formatter.write_str("not found"),
             Self::Validation(_) => formatter.write_str("request validation failed"),
             Self::Malformed(_) => formatter.write_str("malformed request"),
-            Self::Repository(error) => write!(formatter, "{error}"),
+            Self::Conflict => formatter.write_str("conflict"),
+            Self::Data(error) => write!(formatter, "{error}"),
+            Self::Internal => formatter.write_str("internal error"),
         }
     }
 }
@@ -394,15 +404,15 @@ impl std::fmt::Display for ApiError {
 impl std::error::Error for ApiError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Repository(error) => Some(error),
+            Self::Data(error) => Some(error),
             _ => None,
         }
     }
 }
 
-impl From<RepositoryError> for ApiError {
-    fn from(error: RepositoryError) -> Self {
-        Self::Repository(error)
+impl From<DataError> for ApiError {
+    fn from(error: DataError) -> Self {
+        Self::Data(error)
     }
 }
 

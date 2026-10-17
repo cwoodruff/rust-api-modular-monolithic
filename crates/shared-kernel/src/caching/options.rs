@@ -21,10 +21,14 @@ pub const DEFAULT_JITTER_PERCENT: f64 = 0.1;
 /// The lifetime every service in the original actually asks for.
 ///
 /// Each service hard-codes 20 minutes, ignoring both [`DEFAULT_TTL_SECONDS`]
-/// and the per-module values under `Caching:PerModule`.
+/// and `DefaultTTLSeconds`.
 pub const SERVICE_TTL: Duration = Duration::from_secs(20 * 60);
 
 /// Binding of the `Caching` configuration section.
+///
+/// Upstream slimmed this to four members in its bulkhead phase; the per-module
+/// entry limits moved to `Caching:Modules:<Module>:SizeLimit`, read by each
+/// module (see [`super::size_limit_key`]).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct CacheOptions {
@@ -40,22 +44,6 @@ pub struct CacheOptions {
     /// Fallback entry lifetime, in seconds.
     #[serde(rename = "defaultttlseconds", alias = "default_ttl_seconds")]
     pub default_ttl_seconds: u64,
-
-    /// Stale-while-revalidate settings. Declared but unread, as in the original.
-    pub swr: SwrOptions,
-
-    /// Stampede protection. Declared but unread: single flight is unconditional.
-    pub stampede: StampedeOptions,
-
-    /// Cache partitioning. Declared but unread: no caller passes a tenant.
-    pub partitioning: PartitioningOptions,
-
-    /// Per-module lifetimes. Declared but unread: services hard-code 20 minutes.
-    #[serde(rename = "permodule", alias = "per_module")]
-    pub per_module: ModuleTtls,
-
-    /// Redis connection settings, used only when the L2 tier lands.
-    pub redis: RedisOptions,
 }
 
 impl Default for CacheOptions {
@@ -65,11 +53,6 @@ impl Default for CacheOptions {
             tier: "L1".to_owned(),
             provider: "InMemory".to_owned(),
             default_ttl_seconds: DEFAULT_TTL_SECONDS,
-            swr: SwrOptions::default(),
-            stampede: StampedeOptions::default(),
-            partitioning: PartitioningOptions::default(),
-            per_module: ModuleTtls::default(),
-            redis: RedisOptions::default(),
         }
     }
 }
@@ -79,95 +62,6 @@ impl CacheOptions {
     #[must_use]
     pub fn uses_distributed_tier(&self) -> bool {
         self.tier.eq_ignore_ascii_case("L1L2")
-    }
-}
-
-/// Stale-while-revalidate settings. Not implemented in the original.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct SwrOptions {
-    /// Whether serving stale entries is allowed.
-    pub enabled: bool,
-
-    /// How long an entry may be served past expiry. Zero disables.
-    #[serde(rename = "maxstaleseconds", alias = "max_stale_seconds")]
-    pub max_stale_seconds: u64,
-}
-
-/// Stampede protection settings.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct StampedeOptions {
-    /// Whether concurrent misses for one key collapse into a single factory call.
-    #[serde(rename = "singleflight", alias = "single_flight")]
-    pub single_flight: bool,
-}
-
-impl Default for StampedeOptions {
-    fn default() -> Self {
-        Self {
-            single_flight: true,
-        }
-    }
-}
-
-/// Cache partitioning settings. Not implemented in the original.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct PartitioningOptions {
-    /// Whether keys are partitioned by tenant.
-    #[serde(rename = "tenantaware", alias = "tenant_aware")]
-    pub tenant_aware: bool,
-
-    /// Whether keys are partitioned by region.
-    #[serde(rename = "regionaware", alias = "region_aware")]
-    pub region_aware: bool,
-}
-
-/// Per-module lifetime overrides, in seconds. Not read by the original.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct ModuleTtls {
-    /// Lifetime for the Music module.
-    pub music: Option<u64>,
-    /// Lifetime for the Orders module.
-    pub orders: Option<u64>,
-    /// Lifetime for the Administration module.
-    pub administration: Option<u64>,
-    /// Lifetime for the Reporting module.
-    pub reporting: Option<u64>,
-    /// Lifetime for the Identity module.
-    pub identity: Option<u64>,
-}
-
-/// Redis settings for the distributed tier.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct RedisOptions {
-    /// Connection string.
-    #[serde(rename = "connectionstring", alias = "connection_string")]
-    pub connection_string: Option<String>,
-
-    /// Key prefix identifying this application.
-    #[serde(rename = "instancename", alias = "instance_name")]
-    pub instance_name: Option<String>,
-
-    /// Whether to connect over TLS.
-    pub ssl: bool,
-
-    /// Connection pool size.
-    #[serde(rename = "poolsize", alias = "pool_size")]
-    pub pool_size: u32,
-}
-
-impl Default for RedisOptions {
-    fn default() -> Self {
-        Self {
-            connection_string: None,
-            instance_name: None,
-            ssl: true,
-            pool_size: 10,
-        }
     }
 }
 
@@ -233,21 +127,18 @@ mod tests {
         assert_eq!(options.tier, "L1");
         assert_eq!(options.provider, "InMemory");
         assert_eq!(options.default_ttl_seconds, 300);
-        assert!(options.stampede.single_flight);
-        assert!(options.redis.ssl);
-        assert_eq!(options.redis.pool_size, 10);
         assert!(!options.uses_distributed_tier());
     }
 
     #[test]
     fn service_entries_use_a_twenty_minute_lifetime() {
-        let options = CacheEntryOptions::for_service(["music:album", "music:album:by-id"]);
+        let options = CacheEntryOptions::for_service(["catalog:album", "catalog:album:by-id"]);
 
         assert_eq!(
             options.absolute_expiration_relative_to_now,
             Some(Duration::from_secs(1200))
         );
-        assert_eq!(options.tags, vec!["music:album", "music:album:by-id"]);
+        assert_eq!(options.tags, vec!["catalog:album", "catalog:album:by-id"]);
         assert!((options.jitter_percent - 0.1).abs() < f64::EPSILON);
     }
 
@@ -259,8 +150,7 @@ mod tests {
             "enabled": false,
             "tier": "L1L2",
             "defaultttlseconds": 60,
-            "stampede": { "singleflight": false },
-            "redis": { "connectionstring": "localhost:6379", "poolsize": 4 }
+            "modules": { "catalog": { "sizelimit": 1000 } }
         });
 
         let options: CacheOptions = serde_json::from_value(json).expect("section should bind");
@@ -268,14 +158,8 @@ mod tests {
         assert!(!options.enabled);
         assert!(options.uses_distributed_tier());
         assert_eq!(options.default_ttl_seconds, 60);
-        assert!(!options.stampede.single_flight);
-        assert_eq!(
-            options.redis.connection_string.as_deref(),
-            Some("localhost:6379")
-        );
-        assert_eq!(options.redis.pool_size, 4);
-        // Untouched members keep their defaults.
+        // Untouched members keep their defaults, and the per-module limits
+        // beside them do not disturb the binding.
         assert_eq!(options.provider, "InMemory");
-        assert!(options.redis.ssl);
     }
 }

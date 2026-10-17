@@ -1,6 +1,6 @@
 [package]
 name = "module-admin"
-description = "Port of Admin.Module: customers, employees, genres, media types."
+description = "Port of Admin.Module: customers, employees, genres, media types and purchase summaries, in schema administration."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,9 +12,18 @@ workspace = true
 
 [dependencies]
 shared-kernel = { workspace = true }
-shared-persistence = { workspace = true }
-
+administration-contracts = { workspace = true }
+identity-contracts = { workspace = true }
+orders-contracts = { workspace = true }
+validation-rules = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+sqlx = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true }

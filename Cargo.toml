@@ -14,11 +14,15 @@ repository = "https://github.com/cwoodruff/rust-api-modular-monolithic"
 [workspace.dependencies]
 # --- internal crates -------------------------------------------------------
 shared-kernel = { path = "crates/shared-kernel" }
-shared-persistence = { path = "crates/shared-persistence" }
-shared-data-sqlite = { path = "crates/shared-data-sqlite" }
+identity-contracts = { path = "crates/identity-contracts" }
+catalog-contracts = { path = "crates/catalog-contracts" }
+orders-contracts = { path = "crates/orders-contracts" }
+administration-contracts = { path = "crates/administration-contracts" }
 module-admin = { path = "crates/module-admin" }
 module-identity = { path = "crates/module-identity" }
-module-music = { path = "crates/module-music" }
+module-catalog = { path = "crates/module-catalog" }
+test-support = { path = "crates/test-support" }
+validation-rules = { path = "crates/validation-rules" }
 module-orders = { path = "crates/module-orders" }
 module-reporting = { path = "crates/module-reporting" }
 
@@ -42,9 +46,15 @@ serde_json = "1"
 # --- data ------------------------------------------------------------------
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
+    "tls-rustls",
     "sqlite",
+    "postgres",
     "chrono",
+    "uuid",
+    "rust_decimal",
+    "json",
     "macros",
+    "migrate",
 ] }
 chrono = { version = "0.4", features = ["serde"] }
 # `serde-float` makes Decimal serialize as a JSON number, which is what
@@ -61,7 +71,7 @@ sha2 = "0.10"
 # Held at 0.8 to match the rand_core version `rsa` 0.9 expects; the dev key
 # provider generates RSA-2048 through both.
 rand = "0.8"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # --- cross-cutting ---------------------------------------------------------
 moka = { version = "0.12", features = ["future"] }
@@ -69,6 +79,10 @@ dashmap = "6"
 figment = { version = "0.10", features = ["json", "env"] }
 regex = "1"
 async-trait = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+futures = "0.3"
+# Catalog.Host fetches Identity's JWKS over HTTP.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
@@ -80,6 +94,8 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # --- test-only -------------------------------------------------------------
 axum-test = "17"
+testcontainers = { version = "0.25", features = ["blocking"] }
+testcontainers-modules = { version = "0.13", features = ["postgres", "blocking"] }
 mockall = "0.13"
 pretty_assertions = "1"
 

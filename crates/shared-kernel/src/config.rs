@@ -104,6 +104,17 @@ impl AppConfig {
             }
         }
 
+        // Development and Demo read user secrets after the JSON files and
+        // before the environment, as upstream's host does (4ad3c91). The id is
+        // the original's, so `dotnet user-secrets --project
+        // src/ModularMonolith.Api set …` seeds this host too.
+        if environment.exposes_operational_metadata()
+            && let Some(path) = user_secrets_path()
+            && let Some(values) = read_json_layer(&path)?
+        {
+            figment = figment.merge(Serialized::defaults(values));
+        }
+
         figment = figment.merge(Serialized::defaults(environment_layer(std::env::vars())));
 
         Ok(Self {
@@ -140,10 +151,32 @@ impl AppConfig {
     /// `section.key` form; both resolve to the same value.
     #[must_use]
     pub fn get_string(&self, key: &str) -> Option<String> {
-        self.figment
-            .find_value(&normalize_key(key))
-            .ok()
-            .and_then(figment::value::Value::into_string)
+        // Numbers and booleans read as text too, as `IConfiguration` stores
+        // every value as a string: `"PermitLimit": 60` reads as `"60"`.
+        match self
+            .figment
+            .extract_inner::<Value>(&normalize_key(key))
+            .ok()?
+        {
+            Value::String(text) => Some(text),
+            Value::Number(number) => Some(number.to_string()),
+            Value::Bool(flag) => Some(flag.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Reads a value as `T`, falling back to `default` when it is absent or
+    /// does not parse. Port of `IConfiguration.GetValue<T>(key, default)`.
+    pub fn get_or<T: std::str::FromStr>(&self, key: &str, default: T) -> T {
+        self.get_string(key)
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(default)
+    }
+
+    /// Whether `key` is present at all, as a value or a section.
+    #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.figment.find_value(&normalize_key(key)).is_ok()
     }
 
     /// Port of `BuildInfoProvider.GetServiceName`.
@@ -196,6 +229,40 @@ impl AppConfig {
         self.figment
             .extract_inner(&normalize_key(key))
             .map_err(Box::new)
+    }
+}
+
+/// The original host's `UserSecretsId`.
+pub const USER_SECRETS_ID: &str = "e5c98386-8439-49a8-a3d8-cf17fcb7b6dc";
+
+/// Where `dotnet user-secrets` keeps this application's secrets.
+///
+/// `~/.microsoft/usersecrets/<id>/secrets.json` on macOS and Linux,
+/// `%APPDATA%\Microsoft\UserSecrets\<id>\secrets.json` on Windows.
+/// `USER_SECRETS_PATH` overrides it, which is how the tests point at a file of
+/// their own.
+#[must_use]
+pub fn user_secrets_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("USER_SECRETS_PATH") {
+        return Some(PathBuf::from(path));
+    }
+
+    if cfg!(windows) {
+        std::env::var_os("APPDATA").map(|root| {
+            PathBuf::from(root)
+                .join("Microsoft")
+                .join("UserSecrets")
+                .join(USER_SECRETS_ID)
+                .join("secrets.json")
+        })
+    } else {
+        std::env::var_os("HOME").map(|home| {
+            PathBuf::from(home)
+                .join(".microsoft")
+                .join("usersecrets")
+                .join(USER_SECRETS_ID)
+                .join("secrets.json")
+        })
     }
 }
 
@@ -333,16 +400,54 @@ fn as_index_sequence(entries: &serde_json::Map<String, Value>) -> Option<Vec<Val
 }
 
 /// Recursively lowercases object keys, leaving values untouched.
-fn lowercase_keys(value: Value) -> Value {
+///
+/// A key containing `:` is split into nested levels, as .NET's JSON provider
+/// flattens every path on `:`. Two things depend on it: the rate-limit policy
+/// names (`"catalog:api": { … }` is `RateLimiting:Policies:catalog:api:*`), and
+/// `secrets.json`, which stores every value under a flat colon-joined key.
+pub(crate) fn lowercase_keys(value: Value) -> Value {
     match value {
-        Value::Object(entries) => Value::Object(
-            entries
-                .into_iter()
-                .map(|(key, nested)| (key.to_lowercase(), lowercase_keys(nested)))
-                .collect(),
-        ),
+        Value::Object(entries) => {
+            let mut root = serde_json::Map::new();
+            for (key, nested) in entries {
+                let path: Vec<String> = key.split(':').map(str::to_lowercase).collect();
+                merge_at(&mut root, &path, lowercase_keys(nested));
+            }
+            numeric_maps_to_arrays(Value::Object(root))
+        }
         Value::Array(items) => Value::Array(items.into_iter().map(lowercase_keys).collect()),
         scalar => scalar,
+    }
+}
+
+/// Writes `value` at `path`, merging objects that meet there.
+fn merge_at(root: &mut serde_json::Map<String, Value>, path: &[String], value: Value) {
+    let Some((head, rest)) = path.split_first() else {
+        return;
+    };
+
+    if rest.is_empty() {
+        match (root.get_mut(head), value) {
+            (Some(Value::Object(existing)), Value::Object(incoming)) => {
+                for (key, nested) in incoming {
+                    merge_at(existing, std::slice::from_ref(&key), nested);
+                }
+            }
+            (_, value) => {
+                root.insert(head.clone(), value);
+            }
+        }
+        return;
+    }
+
+    let child = root
+        .entry(head.clone())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !child.is_object() {
+        *child = Value::Object(serde_json::Map::new());
+    }
+    if let Value::Object(map) = child {
+        merge_at(map, rest, value);
     }
 }
 

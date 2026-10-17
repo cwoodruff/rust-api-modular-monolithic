@@ -1,6 +1,6 @@
 [package]
 name = "shared-kernel"
-description = "Port of SharedKernel: module contract, cache facade, config, errors, traffic control."
+description = "Port of SharedKernel: module contract, caching, traffic control, events, concurrency, diagnostics, validation, persistence."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,8 +21,12 @@ rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+futures = { workspace = true }
+sqlx = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
 # For the request-scoped trace identifier, which is a task-local.
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]

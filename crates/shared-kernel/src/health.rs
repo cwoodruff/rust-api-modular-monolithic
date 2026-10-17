@@ -21,13 +21,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::extract::State;
-use axum::routing::get;
-use axum::{Json, Router};
+use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::build_info;
-use crate::environment::Environment;
+use crate::endpoints::{HostInfo, RouteGroup};
+use crate::persistence::ModuleDatabase;
 
 /// `status` when the module itself is up.
 pub const HEALTHY: &str = "Healthy";
@@ -37,6 +36,14 @@ pub const DATA_HEALTHY: &str = "Data-Healthy";
 
 /// `status` when the database did not.
 pub const DEGRADED: &str = "Degraded";
+
+/// A module's database answers the data-health question directly.
+#[async_trait]
+impl DatabaseProbe for ModuleDatabase {
+    async fn can_connect(&self) -> bool {
+        ModuleDatabase::can_connect(self).await
+    }
+}
 
 /// The `module` value the root endpoint reports.
 pub const ROOT_MODULE: &str = "root";
@@ -54,21 +61,6 @@ pub trait DatabaseProbe: Send + Sync {
     /// `false`, so a probe that throws and a probe that answers "no" look the
     /// same to a caller.
     async fn can_connect(&self) -> bool;
-}
-
-/// What the health handlers need from the host's state.
-///
-/// Implemented by the application state so this crate can build the routes
-/// without depending on the crate that owns the repositories.
-pub trait HealthContext: Clone + Send + Sync + 'static {
-    /// The environment the host is running as.
-    fn environment(&self) -> &Environment;
-
-    /// The configured service name.
-    fn service_name(&self) -> String;
-
-    /// The database probe backing `/data-health`.
-    fn database_probe(&self) -> Arc<dyn DatabaseProbe>;
 }
 
 /// A health or data-health response.
@@ -148,14 +140,12 @@ impl HealthResponse {
 
     /// Applies the metadata only where the environment exposes it.
     #[must_use]
-    pub fn gated<S: HealthContext>(self, state: &S) -> Self {
-        let environment = state.environment();
-
-        if environment.exposes_operational_metadata() {
+    pub fn gated(self, host: &HostInfo) -> Self {
+        if host.environment.exposes_operational_metadata() {
             self.with_metadata(
-                environment.name(),
+                host.environment.name(),
                 build_info::version(),
-                state.service_name(),
+                &host.service_name,
             )
         } else {
             self
@@ -163,36 +153,48 @@ impl HealthResponse {
     }
 }
 
-/// Mounts `/health` and `/data-health` for one module.
+/// Maps `/health` and `/data-health` for one module.
 ///
-/// Port of `group.MapXHealthEndpoints()` and `group.MapXDataHealthEndpoints()`.
-/// Both stay anonymous — the original leaves every health endpoint
-/// unauthenticated, including the ones in otherwise protected modules.
-pub fn routes<S: HealthContext>(module: &'static str) -> Router<S> {
-    Router::new()
-        .route(
-            "/health",
-            get(move |State(state): State<S>| async move {
-                Json(HealthResponse::new(module, HEALTHY).gated(&state))
-            }),
-        )
-        .route(
-            "/data-health",
-            get(move |State(state): State<S>| async move {
-                let connected = state.database_probe().can_connect().await;
-                let status = if connected { DATA_HEALTHY } else { DEGRADED };
+/// Port of each module's `MapXHealthEndpoints()` and
+/// `MapXDataHealthEndpoints()`, named `<Module>Health` and
+/// `<Module>DataHealth`. Both stay anonymous, and both sit inside the group,
+/// so the module's rate limit covers them as upstream's group does.
+pub fn map_health_endpoints<S>(
+    group: &mut RouteGroup<'_, S>,
+    module: &'static str,
+    probe: Arc<dyn DatabaseProbe>,
+) where
+    S: Clone + Send + Sync + 'static,
+{
+    let host = group.host().clone();
+    group
+        .map_get("/health", {
+            let host = host.clone();
+            move || async move { Json(HealthResponse::new(module, HEALTHY).gated(&host)) }
+        })
+        .with_name(format!("{module}Health"))
+        .produces(&[200]);
 
-                let mut response = HealthResponse::new(module, status).gated(&state);
+    group
+        .map_get("/data-health", move || {
+            let host = host.clone();
+            let probe = Arc::clone(&probe);
+            async move {
+                let connected = probe.can_connect().await;
+                let status = if connected { DATA_HEALTHY } else { DEGRADED };
+                let mut response = HealthResponse::new(module, status).gated(&host);
 
                 // The database member rides along with the rest of the
                 // metadata, so it is absent outside Development and Demo.
-                if state.environment().exposes_operational_metadata() {
+                if host.environment.exposes_operational_metadata() {
                     response = response.with_database(connected);
                 }
 
                 Json(response)
-            }),
-        )
+            }
+        })
+        .with_name(format!("{module}DataHealth"))
+        .produces(&[200]);
 }
 
 /// Renders the current instant the way `DateTime.UtcNow.ToString("O")` does.
@@ -221,13 +223,13 @@ mod tests {
 
     #[test]
     fn the_minimal_response_carries_only_three_members() {
-        let mut response = HealthResponse::new("Music", HEALTHY);
+        let mut response = HealthResponse::new("Catalog", HEALTHY);
         response.timestamp_utc = "2026-09-11T14:23:45.1234567Z".to_owned();
 
         assert_eq!(
             serde_json::to_value(&response).unwrap(),
             json!({
-                "module": "Music",
+                "module": "Catalog",
                 "status": "Healthy",
                 "timestampUtc": "2026-09-11T14:23:45.1234567Z"
             }),
@@ -237,7 +239,7 @@ mod tests {
 
     #[test]
     fn the_development_response_adds_the_operational_members() {
-        let mut response = HealthResponse::new("Music", HEALTHY).with_metadata(
+        let mut response = HealthResponse::new("Catalog", HEALTHY).with_metadata(
             "Development",
             "1.0.0",
             "ModularMonolith.Api",
@@ -247,7 +249,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&response).unwrap(),
             json!({
-                "module": "Music",
+                "module": "Catalog",
                 "status": "Healthy",
                 "timestampUtc": "2026-09-11T14:23:45.1234567Z",
                 "environment": "Development",

@@ -89,11 +89,10 @@ impl InMemoryUserStore {
     #[must_use]
     pub fn from_records(records: &[InMemoryUserRecord]) -> Self {
         let mut users = HashMap::new();
-        let mut ignored = 0_usize;
-
+        // What was loaded and what was skipped is reported once, at startup,
+        // by `diagnostics::report`.
         for record in records {
             if !record.is_usable() {
-                ignored += 1;
                 continue;
             }
 
@@ -117,28 +116,7 @@ impl InMemoryUserStore {
                 username: username.clone(),
             };
 
-            // The original logs the effective entry at startup, never the
-            // password.
-            tracing::info!(
-                username = %user.username,
-                user_id = %user.user_id,
-                roles = %user.roles.join(", "),
-                permissions = %user.permissions.join(", "),
-                tenant = user.tenant.as_deref().unwrap_or("-"),
-                "effective in-memory login"
-            );
-
             users.insert(username.to_lowercase(), user);
-        }
-
-        if ignored > 0 {
-            tracing::warn!(ignored, "ignored incomplete in-memory login entries");
-        }
-
-        if users.is_empty() {
-            tracing::warn!("no usable in-memory logins are configured");
-        } else {
-            tracing::info!(count = users.len(), "loaded in-memory logins");
         }
 
         Self { users }

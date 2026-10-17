@@ -1,97 +1,57 @@
-//! Composition: the module registry, the router, and the middleware stack.
-
-use std::sync::Arc;
+//! The middleware pipeline, ported from `Program.cs`.
 
 use axum::http::{HeaderValue, Method, header};
 use axum::{Router, middleware};
-use module_identity::IdentityRuntime;
-use shared_kernel::module::{Module, mount_all};
-use shared_persistence::AppState;
+use shared_kernel::Services;
+use shared_kernel::auth;
+use shared_kernel::endpoints::EndpointDescriptor;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::middleware::{ALLOWED_ORIGINS, RateLimiter};
-use crate::{middleware as own, routes};
+use crate::middleware::{self as own, ALLOWED_ORIGINS};
 
-/// The module registry, mirroring the hard-coded `GetModules()` list.
+/// Wraps the mapped endpoints in the host's middleware.
 ///
-/// There is no reflection here and none there: the original returns a literal
-/// array, so adding a module means editing this function. Order is the
-/// original's — Administration, Identity, Music, Orders, Reporting.
-#[must_use]
-pub fn registry(identity: Arc<IdentityRuntime>) -> Vec<Box<dyn Module<AppState>>> {
-    vec![
-        Box::new(module_admin::AdministrationModule),
-        Box::new(module_identity::IdentityModule::new(identity)),
-        Box::new(module_music::MusicModule),
-        Box::new(module_orders::OrdersModule),
-        Box::new(module_reporting::ReportingModule),
-    ]
-}
-
-/// The registered modules as `(name, prefix)` pairs.
-#[must_use]
-pub fn modules() -> Vec<(&'static str, &'static str)> {
-    [
-        (module_admin::NAME, module_admin::PREFIX),
-        (module_identity::NAME, module_identity::PREFIX),
-        (module_music::NAME, module_music::PREFIX),
-        (module_orders::NAME, module_orders::PREFIX),
-        (module_reporting::NAME, module_reporting::PREFIX),
-    ]
-    .to_vec()
-}
-
-/// Builds the application.
+/// Layers are applied bottom-up — the last added runs first — so this reads in
+/// reverse of `Program.cs`:
 ///
-/// Layers are applied bottom-up: the last one added runs first, so this reads
-/// in reverse of the original's `Program.cs`. The comments name each one's
-/// counterpart.
-pub fn build(state: AppState, identity: Arc<IdentityRuntime>) -> Router {
-    let secure_transport = !state.environment.is_development();
+/// 1. HSTS — outside Development only
+/// 2. panic → RFC 7807, where `UseExceptionHandler` sits
+/// 3. `UseStatusCodePages()`
+/// 4. `charset=utf-8` on JSON responses
+/// 5. the six security headers, on every response including error responses
+///    (upstream's fix in 09a4c25, which this port always had)
+/// 6. CORS
+/// 7. authentication — the rate limits and authorization live on each
+///    module's group and endpoints, inside routing
+pub fn pipeline(router: Router, services: &Services, _endpoints: &[EndpointDescriptor]) -> Router {
+    let environment = services.environment().clone();
 
-    let router = mount_all(
-        routes::root().merge(routes::swagger(&state)),
-        &registry(Arc::clone(&identity)),
-    );
+    let mut app = router;
 
-    let mut app = router
-        // UseIdentityAuth(). It only *populates* the principal — endpoints stay
-        // anonymous unless they opt in, as they do in the original.
-        .layer(middleware::from_fn_with_state(
-            identity,
-            module_identity::authenticate,
-        ))
-        // UseRateLimiter()
-        .layer(middleware::from_fn_with_state(
-            RateLimiter::default(),
-            own::rate_limit,
-        ))
-        // UseCors("Default")
+    if let Some(authenticator) = services.authenticator() {
+        app = app.layer(middleware::from_fn(move |request, next| {
+            auth::authenticate(std::sync::Arc::clone(&authenticator), request, next)
+        }));
+    }
+
+    app = app
         .layer(cors())
-        // The OWASP A05 security headers
         .layer(middleware::from_fn(own::security_headers))
-        // ASP.NET Core writes `application/json; charset=utf-8`; axum writes a
-        // bare `application/json`. Problem documents are left alone.
         .layer(middleware::from_fn(own::json_charset))
-        // UseStatusCodePages()
         .layer(middleware::from_fn(own::status_code_pages))
-        // UseExceptionHandler(...) — a panic is the closest thing Rust has to
-        // the unhandled exception that handler exists for.
         .layer(CatchPanicLayer::custom(own::panic_to_problem))
         .layer(TraceLayer::new_for_http())
         // Outermost, so the identifier it establishes is in scope for every
-        // layer below — including the panic handler and the status-code pages,
-        // which are the two that write a `traceId` a caller actually sees.
+        // layer below — the panic handler and the status-code pages included.
         .layer(middleware::from_fn(own::request_id));
 
-    // UseHsts() — non-Development only, as in the original.
-    if secure_transport {
+    if !environment.is_development() {
         app = app.layer(middleware::from_fn(own::hsts));
     }
 
-    app.with_state(state)
+    app
 }
 
 /// The `Default` CORS policy.
@@ -113,38 +73,5 @@ fn cors() -> CorsLayer {
             Method::HEAD,
             Method::OPTIONS,
         ])
-        // The trace identifier is only useful if a browser client can read it
-        // back off the response.
         .expose_headers([header::CONTENT_TYPE, own::TRACE_ID_HEADER])
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    use super::*;
-
-    #[test]
-    fn the_registry_matches_the_original_list_and_order() {
-        assert_eq!(
-            modules(),
-            vec![
-                ("Administration", "/api/admin"),
-                ("Identity", "/api/identity"),
-                ("Music", "/api/music"),
-                ("Orders", "/api/orders"),
-                ("Reporting", "/api/reporting"),
-            ]
-        );
-    }
-
-    #[test]
-    fn the_administration_module_reports_a_name_its_prefix_does_not_match() {
-        // Worth pinning: the module is "Administration" but mounts at
-        // "/api/admin", and both halves are wire-visible.
-        let (name, prefix) = modules()[0];
-
-        assert_eq!(name, "Administration");
-        assert_eq!(prefix, "/api/admin");
-    }
 }

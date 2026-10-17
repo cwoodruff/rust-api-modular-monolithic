@@ -179,3 +179,201 @@ mod tests {
         assert!(document.get("detail").is_none());
     }
 }
+
+/// Timestamps rendered the way `System.Text.Json` renders them.
+///
+/// A UTC `DateTime` is `2007-01-02T00:00:00Z`; a `DateTimeOffset` is
+/// `2026-10-16T02:00:00.1234567+00:00`. Both carry up to seven fractional
+/// digits with trailing zeros removed — not chrono's three-six-nine — and a
+/// whole second carries none. Use with `#[serde(with = "…")]`.
+pub mod dotnet {
+    use chrono::{DateTime, Utc};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    fn render(instant: &DateTime<Utc>, suffix: &str) -> String {
+        let ticks = instant.timestamp_subsec_nanos() / 100;
+        let base = instant.format("%Y-%m-%dT%H:%M:%S");
+
+        if ticks == 0 {
+            return format!("{base}{suffix}");
+        }
+
+        let fraction = format!("{ticks:07}");
+        format!("{base}.{}{suffix}", fraction.trim_end_matches('0'))
+    }
+
+    /// A UTC `DateTime`: `…Z`.
+    #[must_use]
+    pub fn date_time(instant: &DateTime<Utc>) -> String {
+        render(instant, "Z")
+    }
+
+    /// A `DateTimeOffset` at UTC: `…+00:00`.
+    #[must_use]
+    pub fn date_time_offset(instant: &DateTime<Utc>) -> String {
+        render(instant, "+00:00")
+    }
+
+    fn parse<'de, D: Deserializer<'de>>(deserializer: D) -> Result<DateTime<Utc>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        DateTime::parse_from_rfc3339(&text)
+            .map(|instant| instant.with_timezone(&Utc))
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(&text, "%Y-%m-%dT%H:%M:%S%.f")
+                    .map(|naive| naive.and_utc())
+            })
+            .map_err(serde::de::Error::custom)
+    }
+
+    /// `#[serde(with = "dotnet::utc")]` for a `DateTime<Utc>` field written as a `DateTime`.
+    pub mod utc {
+        use super::{DateTime, Deserializer, Serializer, Utc};
+
+        /// Serializes.
+        ///
+        /// # Errors
+        ///
+        /// The serializer's.
+        pub fn serialize<S: Serializer>(
+            instant: &DateTime<Utc>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            serializer.serialize_str(&super::date_time(instant))
+        }
+
+        /// Deserializes, treating a timestamp with no zone as UTC as upstream's converter does.
+        ///
+        /// # Errors
+        ///
+        /// Text that is not a timestamp.
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<DateTime<Utc>, D::Error> {
+            super::parse(deserializer)
+        }
+    }
+
+    /// The same, for an optional field.
+    pub mod utc_option {
+        use super::{DateTime, Deserialize, Deserializer, Serializer, Utc};
+
+        /// Serializes, writing `null` for `None`.
+        ///
+        /// # Errors
+        ///
+        /// The serializer's.
+        pub fn serialize<S: Serializer>(
+            instant: &Option<DateTime<Utc>>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match instant {
+                Some(instant) => serializer.serialize_str(&super::date_time(instant)),
+                None => serializer.serialize_none(),
+            }
+        }
+
+        /// Deserializes.
+        ///
+        /// # Errors
+        ///
+        /// Text that is not a timestamp.
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<DateTime<Utc>>, D::Error> {
+            let text: Option<String> = Option::deserialize(deserializer)?;
+            text.map(|text| {
+                super::parse(serde::de::value::StringDeserializer::<D::Error>::new(text))
+            })
+            .transpose()
+        }
+    }
+
+    /// `#[serde(with = "dotnet::offset")]` for a field written as a `DateTimeOffset`.
+    pub mod offset {
+        use super::{DateTime, Deserializer, Serializer, Utc};
+
+        /// Serializes.
+        ///
+        /// # Errors
+        ///
+        /// The serializer's.
+        pub fn serialize<S: Serializer>(
+            instant: &DateTime<Utc>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            serializer.serialize_str(&super::date_time_offset(instant))
+        }
+
+        /// Deserializes.
+        ///
+        /// # Errors
+        ///
+        /// Text that is not a timestamp.
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<DateTime<Utc>, D::Error> {
+            super::parse(deserializer)
+        }
+    }
+
+    /// The same, for an optional field.
+    pub mod offset_option {
+        use super::{DateTime, Deserialize, Deserializer, Serializer, Utc};
+
+        /// Serializes, writing `null` for `None`.
+        ///
+        /// # Errors
+        ///
+        /// The serializer's.
+        pub fn serialize<S: Serializer>(
+            instant: &Option<DateTime<Utc>>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match instant {
+                Some(instant) => serializer.serialize_str(&super::date_time_offset(instant)),
+                None => serializer.serialize_none(),
+            }
+        }
+
+        /// Deserializes.
+        ///
+        /// # Errors
+        ///
+        /// Text that is not a timestamp.
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<DateTime<Utc>>, D::Error> {
+            let text: Option<String> = Option::deserialize(deserializer)?;
+            text.map(|text| {
+                super::parse(serde::de::value::StringDeserializer::<D::Error>::new(text))
+            })
+            .transpose()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #![allow(clippy::unwrap_used)]
+
+        use super::*;
+
+        #[test]
+        fn fractions_trim_to_what_dotnet_writes() {
+            let instant = DateTime::parse_from_rfc3339("2026-10-16T02:00:00.120000Z")
+                .unwrap()
+                .with_timezone(&Utc);
+
+            assert_eq!(date_time(&instant), "2026-10-16T02:00:00.12Z");
+            assert_eq!(date_time_offset(&instant), "2026-10-16T02:00:00.12+00:00");
+        }
+
+        #[test]
+        fn a_whole_second_has_no_fraction() {
+            let instant = DateTime::parse_from_rfc3339("2007-01-02T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc);
+
+            assert_eq!(date_time(&instant), "2007-01-02T00:00:00Z");
+        }
+    }
+}

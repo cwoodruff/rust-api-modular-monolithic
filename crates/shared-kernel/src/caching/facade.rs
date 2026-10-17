@@ -40,6 +40,7 @@ use moka::notification::RemovalCause;
 
 use super::key::CacheKey;
 use super::options::{CacheEntryOptions, CacheOptions};
+use crate::diagnostics::ModuleMeter;
 
 /// Maps a tag to the set of cache keys carrying it.
 type TagIndex = Arc<DashMap<String, HashSet<String>>>;
@@ -113,6 +114,9 @@ pub struct CacheFacade {
     options: CacheOptions,
     entries: Cache<String, CachedEntry>,
     tags: TagIndex,
+    module: Option<String>,
+    size_limit: Option<u64>,
+    meter: Option<Arc<ModuleMeter>>,
 }
 
 impl std::fmt::Debug for CacheFacade {
@@ -130,10 +134,41 @@ impl CacheFacade {
     /// Builds a facade from the `Caching` configuration section.
     #[must_use]
     pub fn new(options: CacheOptions) -> Self {
+        Self::build(options, None, None, None)
+    }
+
+    /// One module's cache, holding at most `size_limit` entries.
+    ///
+    /// Port of `AddModuleCache(moduleName, sizeLimit)`: every module gets a
+    /// store of its own, every entry counts one toward the limit, and filling
+    /// it never evicts another module's entries (ADR-0013). Where .NET's
+    /// `MemoryCache` refuses a new entry once full, moka evicts an old one
+    /// (F19); either way the module stays within its share.
+    #[must_use]
+    pub fn for_module(
+        options: CacheOptions,
+        module: impl Into<String>,
+        size_limit: u64,
+        meter: Arc<ModuleMeter>,
+    ) -> Self {
+        Self::build(options, Some(module.into()), Some(size_limit), Some(meter))
+    }
+
+    fn build(
+        options: CacheOptions,
+        module: Option<String>,
+        size_limit: Option<u64>,
+        meter: Option<Arc<ModuleMeter>>,
+    ) -> Self {
         let tags: TagIndex = Arc::new(DashMap::new());
         let eviction_tags = Arc::clone(&tags);
 
-        let entries = Cache::builder()
+        let mut builder = Cache::builder();
+        if let Some(limit) = size_limit {
+            builder = builder.max_capacity(limit);
+        }
+
+        let entries = builder
             .expire_after(EntryExpiry)
             // Keeps the tag index from accumulating keys for entries that have
             // already expired or been evicted.
@@ -148,7 +183,36 @@ impl CacheFacade {
             options,
             entries,
             tags,
+            module,
+            size_limit,
+            meter,
         }
+    }
+
+    /// The module this cache belongs to, if it is a module's.
+    #[must_use]
+    pub fn module(&self) -> Option<&str> {
+        self.module.as_deref()
+    }
+
+    /// The entry limit, if one was set.
+    #[must_use]
+    pub fn size_limit(&self) -> Option<u64> {
+        self.size_limit
+    }
+
+    /// How many entries the cache holds right now.
+    ///
+    /// Settles moka's pending maintenance first, so the count reflects every
+    /// insert and eviction that has already happened.
+    pub async fn entry_count(&self) -> u64 {
+        self.entries.run_pending_tasks().await;
+        self.entries.entry_count()
+    }
+
+    /// Whether `key` is cached right now.
+    pub async fn contains(&self, key: &CacheKey) -> bool {
+        self.entries.get(&key.to_string()).await.is_some()
     }
 
     /// The configuration this facade was built with.
@@ -224,6 +288,21 @@ impl CacheFacade {
 
         let effective = self.effective(options);
         let cache_key = key.to_string();
+
+        // Hits and misses are counted as upstream counts them: a miss once
+        // per caller before single flight, so coalesced waiters are misses too.
+        if let Some(entry) = self.entries.get(&cache_key).await
+            && let Some(value) = entry.value.downcast_ref::<T>()
+        {
+            if let Some(meter) = &self.meter {
+                meter.cache_hit();
+            }
+            return Ok(Some(value.clone()));
+        }
+        if let Some(meter) = &self.meter {
+            meter.cache_miss();
+        }
+
         let index_key = cache_key.clone();
         let index = Arc::clone(&self.tags);
 

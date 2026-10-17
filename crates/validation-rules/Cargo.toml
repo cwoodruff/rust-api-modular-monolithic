@@ -1,0 +1,14 @@
+[package]
+name = "validation-rules"
+description = "FluentValidation's rule semantics and messages, as a library the modules use. The kernel never depends on it (ADR-0012)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+regex = { workspace = true }

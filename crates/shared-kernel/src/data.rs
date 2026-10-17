@@ -1,9 +1,9 @@
 //! Data-access failures and the responses they produce.
 //!
-//! [`RepositoryError`] lives here rather than beside the repository traits so
-//! that this crate can turn one into a response without depending on the crate
-//! that owns the traits. `shared-persistence` re-exports it, so callers there
-//! see it where they expect to.
+//! [`DataError`] is what a module's data access reports when the database
+//! refuses. Upstream has no equivalent type: an EF Core exception propagates
+//! and the host's exception handler turns it into a 500. Here it is a value,
+//! and becomes the same 500.
 
 use axum::Json;
 use axum::response::{IntoResponse, Response};
@@ -13,8 +13,7 @@ use crate::errors::{ApiError, current_trace_id};
 
 /// Something went wrong talking to the database.
 ///
-/// The driver's own error type is erased because neither this crate nor the
-/// contracts crate may depend on a driver. The C# equivalent is an unhandled
+/// The driver's error is erased so the response path need not know the driver. The C# equivalent is an unhandled
 /// exception, which the host turns into a 500.
 ///
 /// The cause is held behind an `Arc` rather than a `Box` so this is `Clone`.
@@ -22,13 +21,13 @@ use crate::errors::{ApiError, current_trace_id};
 /// call and it fails, every one of them has to be handed the failure, and a
 /// boxed error can only be handed to one.
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum RepositoryError {
+pub enum DataError {
     /// The underlying database reported a failure.
     #[error("database operation failed")]
     Database(#[source] std::sync::Arc<dyn std::error::Error + Send + Sync>),
 }
 
-impl RepositoryError {
+impl DataError {
     /// Wraps a driver error.
     pub fn database(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
         Self::Database(std::sync::Arc::from(source.into()))
@@ -37,20 +36,20 @@ impl RepositoryError {
     /// The 500 the host returns, leaking nothing about the cause.
     #[must_use]
     pub fn into_problem(self, trace_id: impl Into<String>) -> ProblemDetails {
-        tracing::error!(error = %self, "repository call failed");
+        tracing::error!(error = %self, "data access failed");
 
         ProblemDetails::internal_server_error(trace_id)
     }
 }
 
-impl IntoResponse for RepositoryError {
+impl IntoResponse for DataError {
     fn into_response(self) -> Response {
         self.into_problem(current_trace_id()).into_response()
     }
 }
 
 /// Result of a repository call.
-pub type RepositoryResult<T> = Result<T, RepositoryError>;
+pub type DataResult<T> = Result<T, DataError>;
 
 /// Renders a by-id lookup.
 ///
@@ -73,7 +72,7 @@ mod tests {
 
     #[test]
     fn a_repository_error_reports_a_500_without_detail() {
-        let problem = RepositoryError::database("no such table: Album").into_problem("trace-1");
+        let problem = DataError::database("no such table: Album").into_problem("trace-1");
 
         assert_eq!(problem.status, 500);
         assert_eq!(
@@ -84,7 +83,7 @@ mod tests {
 
     #[test]
     fn the_driver_error_is_still_available_for_logging() {
-        let error = RepositoryError::database("no such table: Album");
+        let error = DataError::database("no such table: Album");
 
         assert_eq!(
             std::error::Error::source(&error).map(ToString::to_string),
@@ -109,7 +108,7 @@ mod tests {
 
     #[test]
     fn a_repository_failure_becomes_the_bodiless_500() {
-        let problem = ApiError::from(RepositoryError::database("boom")).into_problem("trace-1");
+        let problem = ApiError::from(DataError::database("boom")).into_problem("trace-1");
 
         assert_eq!(problem.status, 500);
         assert_eq!(problem.detail, None);
