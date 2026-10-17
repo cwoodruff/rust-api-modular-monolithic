@@ -215,8 +215,10 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The database suites start their own `postgres:17-alpine` container with
-testcontainers, so Docker has to be running; the compose database does not.
+The database suites share one `postgres:17-alpine` container named
+`rmm-test-postgres`, which the first suite starts through the Docker CLI and
+later runs reuse, so Docker has to be running; the compose database does not.
+`docker rm -f rmm-test-postgres` removes it.
 `TEST_POSTGRES_URL=postgres://postgres:postgres@localhost:5432/postgres`
 points them at a throwaway server instead. Each test host gets its own clone
 of a migrated, seeded template database, so tests run in parallel.
@@ -239,21 +241,24 @@ suite on each push to `main` and each pull request.
 
 ### Test cost
 
-Median wall clock of three runs per suite, debug build, container start
-included, on an Apple M5 Pro (18 cores, 24 GB), macOS 27.2, Docker 29.8,
-cargo 1.97.1:
+Median wall clock of three runs per suite (`tools/timing.sh`, debug build,
+the shared test container already running), on an Apple M5 Pro (18 cores,
+24 GB), macOS 27.2, Docker 29.8, cargo 1.97.1:
 
 | Suite | Tests | Median (s) | Per test (ms) |
 |---|---:|---:|---:|
-| `architecture-tests` | 26 | 5.86 | 225 |
-| `module-tests` | 41 | 23.42 | 571 |
-| `catalog-host` | 9 | 10.25 | 1139 |
-| `api` | — | — | — |
+| `architecture-tests` | 26 | 10.73 | 412 |
+| `module-tests` | 41 | 4.63 | 112 |
+| `api` | 85 | 16.80 | 197 |
 
-These were taken while other builds shared the machine, so read them as an
-upper bound; `api`'s suite was still being written and is not in the table.
-`tools/timing.sh [runs]` builds once and times `architecture-tests`,
-`module-tests` and `api` with nothing else compiling.
+A test on a module's own host costs a little over half of one on the full
+host here; upstream measured about a quarter. Two choices keep the database
+suites cheap: the full-host suites are one test binary, so they run in
+parallel in one process as upstream's single test assembly does, and
+template databases are kept between runs, keyed by a fingerprint of every
+migration and the seed, so only a changed schema pays for a rebuild.
+`architecture-tests` builds a whole host and asks `cargo metadata` several
+times, which is most of its cost.
 
 ## Check it against the original
 

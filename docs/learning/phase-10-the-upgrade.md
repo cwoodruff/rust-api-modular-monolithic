@@ -222,20 +222,25 @@ Each schema therefore gets its own history table, which is what EF's
 pool's other connections never have `search_path` changed, so queries name
 their schema: `catalog."Track"`.
 
-## 9. One container per test process, and `OnceLock`
+## 9. One shared container, and `OnceLock`
 
 Every `#[tokio::test]` runs on a runtime of its own, created for that test and
 dropped after it. Anything a test shares with another test therefore cannot
 belong to a runtime. `test-support/src/postgres.rs` follows three rules:
 
 - **The server is a `OnceLock<PostgresServer>`**, a plain struct of host, port
-  and credentials. `get_or_init` starts the container the first time any test
-  asks, and every later test gets the same address.
-- **The container is started on a plain thread.** testcontainers' blocking
-  runner creates its own runtime, and a runtime cannot start inside another
-  one, which a test's async body is. The container handle is parked in a
-  second `OnceLock` that is never dropped; Ryuk, testcontainers' reaper,
-  removes the container when the process exits.
+  and credentials. `get_or_init` finds the container the first time any test
+  asks, starting it if it is not running, and every later test gets the same
+  address.
+- **The container outlives the process, on purpose.** The first version used
+  the `testcontainers` crate and parked its handle in a `static`. A `static`
+  is never dropped, so the handle's `Drop` never stopped the container, and
+  nothing else did: one run left a hundred behind. Now every test process
+  shares one container, `rmm-test-postgres`, started with the Docker CLI if
+  it is not already up. Each process stamps the databases it creates with
+  its start time, and the first template request drops any older than six
+  hours. A resource that cannot be cleaned up at exit is made safe to reuse
+  instead.
 - **No pools are shared.** A sqlx pool spawns tasks on the runtime that made
   it, so a pool created in one test is unusable in the next. Fixture
   operations open one connection, use it, and close it.
@@ -293,7 +298,7 @@ milliseconds, and no test ever sees another's writes.
 | `BackgroundService` | `HostedService::execute` + `CancellationToken` | `tokio_util` |
 | `Database.Migrate()` per context | `sqlx::migrate!` per crate, `search_path` per schema | `_sqlx_migrations` per schema |
 | `ICollectionFixture` / static fixture | `OnceLock` static | Must not hold runtime-bound values |
-| Testcontainers | `testcontainers` + `testcontainers-modules` | Blocking runner off the test runtime |
+| Testcontainers | one shared container via the Docker CLI | Reused across processes; stale databases dropped by stamp |
 
 **Back to the start:** [Phase 0 — the scaffold](phase-0-scaffold.md), or the
 [index](README.md) for the whole series.

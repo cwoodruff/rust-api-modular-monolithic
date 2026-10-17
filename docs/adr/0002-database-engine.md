@@ -23,8 +23,8 @@ could not share a database with it or reproduce its behavior.
 
 - PostgreSQL 17 is the only database engine. Local development runs it from
   `docker-compose.yml` (init scripts in `docker/postgres-init/`); tests run it
-  with the `testcontainers` crate, or against the server named by
-  `TEST_POSTGRES_URL`.
+  in one shared container, `rmm-test-postgres`, or against the server named
+  by `TEST_POSTGRES_URL`.
 - The schema is defined by `sqlx` migrations kept in each owning module's
   crate (ADR-0003). There is no shared migration set; the port moves to
   PostgreSQL and to per-module migrations in the same step.

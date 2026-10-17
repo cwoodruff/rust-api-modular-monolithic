@@ -83,7 +83,7 @@ fn user_secrets_load_in_development_and_demo_only() {
     let status = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "user_secrets_load_in_development_and_demo_only",
+            "demo_environment::user_secrets_load_in_development_and_demo_only",
             "--test-threads",
             "1",
         ])

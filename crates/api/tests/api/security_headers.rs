@@ -4,10 +4,8 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
+use crate::common::http::{TestRequest, TestResponse};
 use axum::http::StatusCode;
-use common::http::{TestRequest, TestResponse};
 use serde_json::json;
 
 fn assert_headers(response: &TestResponse, what: &str) {
@@ -35,7 +33,7 @@ fn assert_headers(response: &TestResponse, what: &str) {
 
 #[tokio::test]
 async fn every_response_carries_the_six_headers_errors_included() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let token = host.token("admin").await;
 
     let root = host.send(TestRequest::get("/")).await;

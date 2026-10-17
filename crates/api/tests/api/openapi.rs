@@ -3,10 +3,8 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
+use crate::common::http::TestRequest;
 use axum::http::StatusCode;
-use common::http::TestRequest;
 
 const DOCUMENTS: [(&str, &str); 5] = [
     ("catalog", "/api/catalog/"),
@@ -18,7 +16,7 @@ const DOCUMENTS: [(&str, &str); 5] = [
 
 #[tokio::test]
 async fn every_module_document_holds_only_its_modules_paths_and_v1_holds_them_all() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
 
     let v1 = host
         .send(TestRequest::get("/swagger/v1/swagger.json"))

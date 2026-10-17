@@ -3,15 +3,13 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
-use common::http::TestRequest;
+use crate::common::http::TestRequest;
 use serde_json::json;
 use shared_kernel::Environment;
 
 #[tokio::test]
 async fn exhausting_catalogs_budget_leaves_orders_untouched() {
-    let host = common::host_with(
+    let host = crate::common::host_with(
         Environment::Development,
         json!({ "RateLimiting": { "Policies": { "catalog:api": { "PermitLimit": 3, "WindowSeconds": 600 } } } }),
     )
@@ -39,7 +37,7 @@ async fn exhausting_catalogs_budget_leaves_orders_untouched() {
 
 #[tokio::test]
 async fn the_work_queues_are_exactly_orders_and_reportings() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
 
     let queues: Vec<String> = host
         .host
@@ -59,7 +57,7 @@ async fn the_work_queues_are_exactly_orders_and_reportings() {
 
 #[tokio::test]
 async fn filling_one_modules_cache_never_evicts_anothers() {
-    let host = common::host_with(
+    let host = crate::common::host_with(
         Environment::Development,
         json!({ "Caching": { "Modules": { "Catalog": { "SizeLimit": 2 } } } }),
     )
@@ -87,7 +85,7 @@ async fn filling_one_modules_cache_never_evicts_anothers() {
 
 #[tokio::test]
 async fn a_request_is_counted_on_its_modules_meter() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let token = host.token("demo").await;
 
     host.send(TestRequest::get("/api/catalog/albums/1").bearer(&token))

@@ -3,12 +3,10 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
+use crate::common::http::TestRequest;
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use common::http::TestRequest;
 use serde_json::Value;
 
 fn claims(token: &str) -> Value {
@@ -22,7 +20,7 @@ fn claims(token: &str) -> Value {
 
 #[tokio::test]
 async fn the_admin_token_carries_role_permissions_and_tenant() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let token = host.token("admin").await;
     let claims = claims(&token);
 
@@ -48,7 +46,7 @@ async fn the_admin_token_carries_role_permissions_and_tenant() {
 
 #[tokio::test]
 async fn each_policy_admits_exactly_the_callers_it_names() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let admin = host.token("admin").await;
     let demo = host.token("demo").await;
     let usermo = host.token("usermo").await;
@@ -122,7 +120,7 @@ async fn each_policy_admits_exactly_the_callers_it_names() {
 
 #[tokio::test]
 async fn the_dead_letter_list_is_empty_and_an_unknown_retry_is_a_404() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let admin = host.token("admin").await;
 
     assert_eq!(

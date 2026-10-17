@@ -15,7 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The database suites start this image with testcontainers; pulling it
+  # The database suites start one container of this image; pulling it
   # while the build runs takes the download off the first test's clock.
   POSTGRES_IMAGE: postgres:17-alpine
   RUSTFLAGS: -D warnings

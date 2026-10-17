@@ -3,10 +3,8 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
+use crate::common::http::TestRequest;
 use axum::http::StatusCode;
-use common::http::TestRequest;
 use serde_json::{Value, json};
 use shared_kernel::Environment;
 
@@ -32,7 +30,7 @@ fn keys(document: &Value) -> Vec<&str> {
 
 #[tokio::test]
 async fn production_exposes_only_module_status_and_time() {
-    let host = common::host_with(Environment::Production, json!({})).await;
+    let host = crate::common::host_with(Environment::Production, json!({})).await;
 
     for (uri, module) in HEALTH {
         let document = host.send(TestRequest::get(uri)).await.json();
@@ -73,7 +71,7 @@ async fn production_exposes_only_module_status_and_time() {
 
 #[tokio::test]
 async fn demo_adds_the_operational_metadata_and_the_database_member() {
-    let host = common::host_with(Environment::Demo, json!({})).await;
+    let host = crate::common::host_with(Environment::Demo, json!({})).await;
 
     for (uri, _) in HEALTH {
         let document = host.send(TestRequest::get(uri)).await.json();

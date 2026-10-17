@@ -4,14 +4,12 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
+use crate::common::http::TestRequest;
 use axum::http::StatusCode;
-use common::http::TestRequest;
 
 #[tokio::test]
 async fn the_root_allows_sixty_a_window_and_refuses_the_rest() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
 
     let mut ok = 0;
     let mut rejected = None;
@@ -45,7 +43,7 @@ async fn the_root_allows_sixty_a_window_and_refuses_the_rest() {
 
 #[tokio::test]
 async fn ten_requests_are_all_allowed() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
 
     for _ in 0..10 {
         assert_eq!(
@@ -57,7 +55,7 @@ async fn ten_requests_are_all_allowed() {
 
 #[tokio::test]
 async fn an_authenticated_caller_is_limited_by_the_modules_policy() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let token = host.token("demo").await;
 
     let mut statuses = Vec::new();
@@ -81,7 +79,7 @@ async fn an_authenticated_caller_is_limited_by_the_modules_policy() {
 
 #[tokio::test]
 async fn logins_are_limited_by_identitys_policy() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
 
     let mut limited = false;
     for _ in 0..65 {

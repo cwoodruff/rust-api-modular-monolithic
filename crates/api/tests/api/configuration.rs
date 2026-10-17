@@ -3,8 +3,6 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
 use std::collections::BTreeSet;
 
 use serde_json::Value;
@@ -17,7 +15,7 @@ fn appsettings() -> Value {
 
 #[tokio::test]
 async fn every_registered_limit_has_its_value_in_appsettings() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let services = host.host.services();
     let file = appsettings();
 

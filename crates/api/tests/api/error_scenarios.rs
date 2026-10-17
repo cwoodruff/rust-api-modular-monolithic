@@ -2,15 +2,13 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
+use crate::common::http::TestRequest;
 use axum::http::{Method, StatusCode};
-use common::http::TestRequest;
 use serde_json::json;
 
 #[tokio::test]
 async fn malformed_bodies_are_malformed_requests() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let token = host.token("admin").await;
 
     for body in [r#"{"Name": "#, r#"{"Name": "Rock""#, "", "not json"] {
@@ -41,7 +39,7 @@ async fn malformed_bodies_are_malformed_requests() {
 
 #[tokio::test]
 async fn the_wrong_content_type_and_the_wrong_method_are_refused() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let token = host.token("admin").await;
 
     let text = host
@@ -65,9 +63,9 @@ async fn the_wrong_content_type_and_the_wrong_method_are_refused() {
 
 #[tokio::test]
 async fn bad_credentials_and_bad_tokens_are_401() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
 
-    for (username, password) in [("nobody", common::PASSWORD), ("admin", "wrong")] {
+    for (username, password) in [("nobody", crate::common::PASSWORD), ("admin", "wrong")] {
         let response = host
             .send(
                 TestRequest::post("/api/identity/login")

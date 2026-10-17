@@ -27,8 +27,8 @@ router with:
   `map_endpoints`;
 - a database cloned from a per-module template that holds only that module's
   schema, optionally with its share of the Chinook seed. The template is
-  migrated once per test run with `testcontainers` (or the server at
-  `TEST_POSTGRES_URL`); each host clones it with `CREATE DATABASE ...
+  migrated once per test process on the shared `rmm-test-postgres`
+  container (or the server at `TEST_POSTGRES_URL`); each host clones it with `CREATE DATABASE ...
   TEMPLATE ... STRATEGY FILE_COPY` under a lock, so clones never race the
   template. Resetting truncates only that module's schema. Reporting is the
   exception: its views read the other three schemas, so its host migrates

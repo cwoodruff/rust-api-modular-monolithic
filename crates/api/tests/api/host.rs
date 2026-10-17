@@ -4,10 +4,8 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
+use crate::common::http::TestRequest;
 use axum::http::{Method, StatusCode};
-use common::http::TestRequest;
 use serde_json::json;
 use shared_kernel::Environment;
 
@@ -21,7 +19,7 @@ const MODULES: [(&str, &str); 5] = [
 
 #[tokio::test]
 async fn the_root_endpoint_reports_the_service() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let response = host.send(TestRequest::get("/")).await;
 
     assert_eq!(response.status, StatusCode::OK);
@@ -40,7 +38,7 @@ async fn the_root_endpoint_reports_the_service() {
 
 #[tokio::test]
 async fn every_module_answers_health_and_data_health_under_its_own_name() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
 
     for (module, prefix) in MODULES {
         let health = host
@@ -63,7 +61,7 @@ async fn every_module_answers_health_and_data_health_under_its_own_name() {
 
 #[tokio::test]
 async fn the_health_timestamp_uses_the_round_trip_format() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let document = host
         .send(TestRequest::get("/api/catalog/health"))
         .await
@@ -76,7 +74,7 @@ async fn the_health_timestamp_uses_the_round_trip_format() {
 
 #[tokio::test]
 async fn an_unrecognized_environment_is_treated_as_production() {
-    let host = common::host_with(Environment::Other("Staging".to_owned()), json!({})).await;
+    let host = crate::common::host_with(Environment::Other("Staging".to_owned()), json!({})).await;
     let document = host
         .send(TestRequest::get("/api/catalog/health"))
         .await
@@ -87,7 +85,7 @@ async fn an_unrecognized_environment_is_treated_as_production() {
 
 #[tokio::test]
 async fn development_does_not_send_hsts_but_production_does() {
-    let development = common::host().await;
+    let development = crate::common::host().await;
     assert!(
         development
             .send(TestRequest::get("/"))
@@ -96,7 +94,7 @@ async fn development_does_not_send_hsts_but_production_does() {
             .is_none()
     );
 
-    let production = common::host_with(Environment::Production, json!({})).await;
+    let production = crate::common::host_with(Environment::Production, json!({})).await;
     assert_eq!(
         production
             .send(TestRequest::get("/"))
@@ -109,7 +107,7 @@ async fn development_does_not_send_hsts_but_production_does() {
 
 #[tokio::test]
 async fn cors_grants_exactly_the_configured_origins() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
 
     let preflight = host
         .send(
@@ -150,7 +148,7 @@ async fn cors_grants_exactly_the_configured_origins() {
 
 #[tokio::test]
 async fn bodiless_errors_get_problem_documents() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
 
     let missing = host.send(TestRequest::get("/does-not-exist")).await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
@@ -177,7 +175,7 @@ async fn bodiless_errors_get_problem_documents() {
 #[tokio::test]
 async fn a_route_constraint_that_fails_is_a_404_before_authentication() {
     // `{id:int}` upstream: `/albums/abc` matches no route, so no token is asked for.
-    let host = common::host().await;
+    let host = crate::common::host().await;
 
     assert_eq!(
         host.send(TestRequest::get("/api/catalog/albums/abc"))
@@ -195,7 +193,7 @@ async fn a_route_constraint_that_fails_is_a_404_before_authentication() {
 
 #[tokio::test]
 async fn swagger_is_mounted_in_development_and_absent_in_production() {
-    let development = common::host().await;
+    let development = crate::common::host().await;
     let document = development
         .send(TestRequest::get("/swagger/v1/swagger.json"))
         .await;
@@ -214,7 +212,7 @@ async fn swagger_is_mounted_in_development_and_absent_in_production() {
         StatusCode::OK
     );
 
-    let production = common::host_with(Environment::Production, json!({})).await;
+    let production = crate::common::host_with(Environment::Production, json!({})).await;
     assert_eq!(
         production
             .send(TestRequest::get("/swagger/v1/swagger.json"))
@@ -230,7 +228,7 @@ async fn swagger_is_mounted_in_development_and_absent_in_production() {
 
 #[tokio::test]
 async fn trace_identifiers_tie_the_header_to_the_body() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
 
     for uri in ["/", "/api/catalog/health", "/no-such-route"] {
         let header = host
@@ -282,7 +280,7 @@ async fn trace_identifiers_tie_the_header_to_the_body() {
 
 #[tokio::test]
 async fn healthz_reports_every_module_database() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let response = host.send(TestRequest::get("/healthz")).await;
 
     assert_eq!(response.status, StatusCode::OK);
@@ -308,7 +306,7 @@ async fn healthz_reports_every_module_database() {
 
 #[tokio::test]
 async fn an_unreachable_database_is_unhealthy_on_healthz_and_degraded_on_data_health() {
-    let host = common::host_with(
+    let host = crate::common::host_with(
         Environment::Development,
         json!({ "ConnectionStrings": {
             "AppDatabase": "Host=127.0.0.1;Port=1;Database=nowhere;Username=x;Password=x",

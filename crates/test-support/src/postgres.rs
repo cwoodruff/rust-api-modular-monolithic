@@ -136,6 +136,48 @@ fn process_stamp() -> u64 {
     *STAMP.get_or_init(unix_seconds)
 }
 
+/// A fingerprint of everything a template's contents depend on.
+fn fingerprint() -> String {
+    static FINGERPRINT: OnceLock<String> = OnceLock::new();
+    FINGERPRINT
+        .get_or_init(|| {
+            use sha2::{Digest, Sha256};
+
+            let root = crate::content_root();
+            let mut files: Vec<std::path::PathBuf> = vec![
+                root.join("data/chinook-postgres-seed.sql"),
+                root.join("crates/api/src/db_seeder.rs"),
+                root.join("crates/api/tests/api/common.rs"),
+                root.join("crates/module-tests/src/lib.rs"),
+                root.join("crates/test-support/src/postgres.rs"),
+            ];
+            for parent in ["crates", "samples"] {
+                let Ok(crates) = std::fs::read_dir(root.join(parent)) else {
+                    continue;
+                };
+                for entry in crates.flatten() {
+                    if let Ok(migrations) = std::fs::read_dir(entry.path().join("migrations")) {
+                        files.extend(migrations.flatten().map(|migration| migration.path()));
+                    }
+                }
+            }
+            files.sort();
+
+            let mut hasher = Sha256::new();
+            for file in files {
+                hasher.update(file.to_string_lossy().as_bytes());
+                hasher.update(std::fs::read(&file).unwrap_or_default());
+            }
+            hasher
+                .finalize()
+                .iter()
+                .take(6)
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        })
+        .clone()
+}
+
 fn unix_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -257,12 +299,13 @@ impl PostgresServer {
         *created = true;
     }
 
-    /// Drops what earlier processes left behind: every test, template and
-    /// empty database whose stamp is more than six hours old.
+    /// Drops what earlier processes left behind: every test and empty
+    /// database whose stamp is more than six hours old. Templates are kept;
+    /// a changed fingerprint replaces them.
     async fn drop_stale_databases(&self) {
         let mut connection = self.connect("postgres").await;
         let names: Vec<String> = sqlx::query_scalar(
-            "SELECT datname FROM pg_database WHERE datname ~ '^(test|tpl|empty)_' AND NOT datistemplate",
+            "SELECT datname FROM pg_database WHERE datname ~ '^(test|empty)_' AND NOT datistemplate",
         )
         .fetch_all(&mut connection)
         .await
@@ -283,8 +326,15 @@ impl PostgresServer {
         }
     }
 
-    /// The template named `name`, built by `build` the first time any test in
-    /// this process asks for it.
+    /// The template named `name`, built by `build` only if no process has
+    /// built this version of it before.
+    ///
+    /// The name carries a fingerprint of everything a template's contents
+    /// depend on — every migration, the seed, and the two places templates
+    /// are built from — so a template survives between runs until one of them
+    /// changes. Building and checking happen under a server-wide advisory
+    /// lock, so two test processes never build the same template at once, and
+    /// a template is used only once it is marked ready.
     ///
     /// `build` receives the template's database name and must leave it
     /// migrated and seeded as every clone should start.
@@ -293,7 +343,7 @@ impl PostgresServer {
         F: FnOnce(String) -> Fut,
         Fut: Future<Output = ()>,
     {
-        let database = format!("tpl_{name}_{}_{}", process_stamp(), std::process::id());
+        let database = format!("tpl_{name}_{}", fingerprint());
         let mut built = TEMPLATES.lock().await;
         let built = built.get_or_insert_with(HashSet::new);
 
@@ -302,26 +352,80 @@ impl PostgresServer {
         }
 
         self.ensure_roles().await;
-        self.admin(&format!(
-            r#"DROP DATABASE IF EXISTS "{database}" WITH (FORCE)"#
-        ))
-        .await;
-        self.admin(&format!(r#"CREATE DATABASE "{database}""#))
+
+        let mut lock = self.connect("postgres").await;
+        sqlx::query("SELECT pg_advisory_lock(hashtext('rmm-test-templates'))")
+            .execute(&mut lock)
+            .await
+            .expect("the template lock should be granted");
+
+        let ready: Option<String> = sqlx::query_scalar(
+            "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = $1",
+        )
+        .bind(&database)
+        .fetch_optional(&mut lock)
+        .await
+        .expect("pg_database should be readable")
+        .flatten();
+
+        if ready.as_deref() != Some("ready") {
+            // Earlier versions of this template are of no further use.
+            let outdated: Vec<String> = sqlx::query_scalar(
+                "SELECT datname FROM pg_database WHERE datname LIKE $1 AND datname <> $2",
+            )
+            .bind(format!("tpl\\_{name}\\_%"))
+            .bind(&database)
+            .fetch_all(&mut lock)
+            .await
+            .unwrap_or_default();
+            for old in outdated
+                .into_iter()
+                .chain(std::iter::once(database.clone()))
+            {
+                self.admin(&format!(r#"DROP DATABASE IF EXISTS "{old}" WITH (FORCE)"#))
+                    .await;
+            }
+
+            self.admin(&format!(r#"CREATE DATABASE "{database}""#))
+                .await;
+            build(database.clone()).await;
+            self.admin(&format!(r#"COMMENT ON DATABASE "{database}" IS 'ready'"#))
+                .await;
+        }
+
+        let _ = sqlx::query("SELECT pg_advisory_unlock(hashtext('rmm-test-templates'))")
+            .execute(&mut lock)
             .await;
-        build(database.clone()).await;
+        let _ = lock.close().await;
 
         built.insert(database.clone());
         database
     }
 
     /// A fresh database copied from `template`.
+    ///
+    /// Serialized across every process on the server, not just this one:
+    /// PostgreSQL refuses to copy a template another copy is reading.
     pub async fn clone_of(&self, template: &str) -> String {
         let database = format!("test_{}_{}", process_stamp(), uuid::Uuid::new_v4().simple());
         let _serialized = CLONE_LOCK.lock().await;
-        self.admin(&format!(
+
+        let mut lock = self.connect("postgres").await;
+        sqlx::query("SELECT pg_advisory_lock(hashtext('rmm-test-clones'))")
+            .execute(&mut lock)
+            .await
+            .expect("the clone lock should be granted");
+        let created = sqlx::raw_sql(&format!(
             r#"CREATE DATABASE "{database}" TEMPLATE "{template}" STRATEGY FILE_COPY"#
         ))
+        .execute(&mut lock)
         .await;
+        let _ = sqlx::query("SELECT pg_advisory_unlock(hashtext('rmm-test-clones'))")
+            .execute(&mut lock)
+            .await;
+        let _ = lock.close().await;
+
+        created.unwrap_or_else(|error| panic!("cloning {template}: {error}"));
         database
     }
 

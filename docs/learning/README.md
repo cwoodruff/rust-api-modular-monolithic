@@ -31,7 +31,7 @@ trait objects from Phase 1 are assumed by Phase 5, and so on.
 | 7 | [Administration](phase-7-administration.md) | `FromRequest` body extractors, newtypes, layered error enums with `From`, tuple responses with headers, `serde(alias)`, `Result<bool, E>`, a source-scanning test |
 | 8 | [Parity verification](phase-8-parity.md) | The harness, four precise wire fixes, `&'static str` tables, and why tests that assert your implementation cannot find these bugs |
 | 9 | [Ops and docs](phase-9-ops-docs.md) | Release profiles, Docker dependency caching, `--locked`, linking, fail-fast startup, rustdoc conventions, `cargo doc` |
-| 10 | [Following the original's upgrade](phase-10-the-upgrade.md) | A typed composition object instead of DI, builders that finish on `Drop`, endpoint metadata, named policies versus policy types, outbox and inbox over sqlx transactions, `for<'c>` closures, `Any` downcasts, bounded `mpsc` work queues, `sqlx::migrate!` per crate, `OnceLock` fixtures across tokio runtimes, testcontainers with template cloning |
+| 10 | [Following the original's upgrade](phase-10-the-upgrade.md) | A typed composition object instead of DI, builders that finish on `Drop`, endpoint metadata, named policies versus policy types, outbox and inbox over sqlx transactions, `for<'c>` closures, `Any` downcasts, bounded `mpsc` work queues, `sqlx::migrate!` per crate, `OnceLock` fixtures across tokio runtimes, a shared test container with template cloning |
 
 Phases 0 to 9 describe the first port, made against the original's SQLite
 shape; their crate names (`module-music`, `shared-persistence`) and commits are

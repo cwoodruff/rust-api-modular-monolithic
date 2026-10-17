@@ -99,7 +99,7 @@ docs/adr/                   0000 template, 0001–0020 as upstream, adapted to R
 | `ModuleMeter` (`System.Diagnostics.Metrics`) | `ModuleMeter`: named counters tagged `module`, readable in-process | No exporter wired, as upstream |
 | `IHealthCheck` per context, `/healthz` | `HealthCheck` trait per module database, `/healthz` | Same JSON, 503 when unhealthy |
 | `TimeProvider` | `Clock` trait (`SystemClock`, `ManualClock`) | The retry-schedule test advances a manual clock, as upstream's does |
-| Testcontainers + template cloning | `testcontainers` + `CREATE DATABASE … TEMPLATE … STRATEGY FILE_COPY` under a lock | `TEST_POSTGRES_URL` points the suites at an existing server instead |
+| Testcontainers + template cloning | one shared container started through the Docker CLI + `CREATE DATABASE … TEMPLATE … STRATEGY FILE_COPY` under a lock | `TEST_POSTGRES_URL` points the suites at an existing server instead. The `testcontainers` crate was tried first and dropped: its per-process containers were never stopped (ADR-0019) |
 | User secrets (Development and Demo) | `~/.microsoft/usersecrets/<UserSecretsId>/secrets.json`, same id as the original | So the original's `dotnet user-secrets` commands seed this port too |
 | `Catalog.Host` JwtBearer with a JWKS retriever | `reqwest` fetch + `jsonwebtoken::jwk::JwkSet`, cached | |
 

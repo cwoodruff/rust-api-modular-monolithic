@@ -5,7 +5,7 @@
 //! real `DbSeeder` and seeded with the real Chinook script, via the very
 //! `api::build` the binary runs — and every host after that gets a clone.
 
-#![allow(dead_code, clippy::expect_used, clippy::unwrap_used)]
+#![allow(dead_code)]
 
 use std::sync::Arc;
 

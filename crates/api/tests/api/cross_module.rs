@@ -3,13 +3,11 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
-use common::http::TestRequest;
+use crate::common::http::TestRequest;
 
 #[tokio::test]
 async fn a_finalized_invoice_reaches_both_consumers() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let token = host.token("admin").await;
 
     let invoice = host
@@ -57,7 +55,7 @@ async fn a_finalized_invoice_reaches_both_consumers() {
 }
 
 /// Runs one dispatcher batch, as upstream's test calls `ProcessBatchAsync`.
-async fn api_dispatch(host: &common::TestHost) -> usize {
+async fn api_dispatch(host: &crate::common::TestHost) -> usize {
     host.host
         .dispatch_outbox_once()
         .await

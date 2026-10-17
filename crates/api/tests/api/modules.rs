@@ -4,11 +4,9 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
+use crate::common::http::{TestRequest, TestResponse};
+use crate::common::{PASSWORD, TestHost};
 use axum::http::StatusCode;
-use common::http::{TestRequest, TestResponse};
-use common::{PASSWORD, TestHost};
 use serde_json::{Value, json};
 use shared_kernel::Environment;
 
@@ -28,7 +26,7 @@ fn users() -> Value {
 }
 
 async fn host() -> TestHost {
-    common::host_with(
+    crate::common::host_with(
         Environment::Development,
         json!({ "Identity": { "InMemoryUsers": users() } }),
     )

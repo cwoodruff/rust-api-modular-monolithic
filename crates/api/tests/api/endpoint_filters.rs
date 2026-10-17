@@ -4,12 +4,10 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
 use std::sync::{Arc, Mutex};
 
+use crate::common::http::TestRequest;
 use axum::http::StatusCode;
-use common::http::TestRequest;
 use serde_json::json;
 use shared_kernel::endpoints::{Endpoints, HostInfo, filter};
 use shared_kernel::{Environment, validation};
@@ -60,7 +58,7 @@ async fn group_filters_run_before_endpoint_filters_each_in_order() {
 
 #[tokio::test]
 async fn an_invalid_body_is_refused_before_the_handler_runs() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let token = host.token("admin").await;
     let count = || async {
         host.send(TestRequest::get("/api/admin/genres").bearer(&token))

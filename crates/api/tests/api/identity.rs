@@ -6,13 +6,11 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
+use crate::common::http::{TestRequest, TestResponse};
+use crate::common::{PASSWORD, TestHost};
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use common::http::{TestRequest, TestResponse};
-use common::{PASSWORD, TestHost};
 use serde_json::{Value, json};
 use shared_kernel::Environment;
 
@@ -31,7 +29,7 @@ fn overrides() -> Value {
 }
 
 async fn host() -> TestHost {
-    common::host_with(Environment::Development, overrides()).await
+    crate::common::host_with(Environment::Development, overrides()).await
 }
 
 async fn post(host: &TestHost, uri: &str, body: Value) -> TestResponse {
@@ -424,7 +422,7 @@ async fn logout_revokes_only_the_callers_own_session() {
 
 #[tokio::test]
 async fn in_memory_logins_work_only_in_development_and_demo() {
-    let production = common::host_with(Environment::Production, overrides()).await;
+    let production = crate::common::host_with(Environment::Production, overrides()).await;
     let refused = post(
         &production,
         "/api/identity/login",
@@ -433,7 +431,7 @@ async fn in_memory_logins_work_only_in_development_and_demo() {
     .await;
     assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
 
-    let demo = common::host_with(Environment::Demo, overrides()).await;
+    let demo = crate::common::host_with(Environment::Demo, overrides()).await;
     assert_eq!(
         post(
             &demo,
@@ -445,7 +443,7 @@ async fn in_memory_logins_work_only_in_development_and_demo() {
         StatusCode::OK
     );
 
-    let empty = common::host_with(
+    let empty = crate::common::host_with(
         Environment::Development,
         json!({ "Identity": { "InMemoryUsers": [] } }),
     )
@@ -465,7 +463,7 @@ async fn in_memory_logins_work_only_in_development_and_demo() {
 #[tokio::test]
 async fn a_token_from_one_host_is_not_accepted_by_another() {
     let issuer = host().await;
-    let other = common::host_with_own_keys(Environment::Development, overrides()).await;
+    let other = crate::common::host_with_own_keys(Environment::Development, overrides()).await;
     let token = login(&issuer, "admin").await["access_token"]
         .as_str()
         .unwrap()

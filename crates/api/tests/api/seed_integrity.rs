@@ -3,8 +3,6 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-mod common;
-
 use sha2::{Digest, Sha256};
 use sqlx::Connection;
 
@@ -24,7 +22,7 @@ const COUNTS: [(&str, i64); 11] = [
 
 #[tokio::test]
 async fn the_seed_is_the_chinook_data_and_nothing_else() {
-    let host = common::host().await;
+    let host = crate::common::host().await;
     let mut connection = test_support::postgres::server()
         .connect(&host.database)
         .await;
