@@ -6,8 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  # The database suites start this image with testcontainers; pulling it
+  # while the build runs takes the download off the first test's clock.
+  POSTGRES_IMAGE: postgres:17-alpine
   RUSTFLAGS: -D warnings
 
 jobs:
@@ -16,6 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Pull the PostgreSQL test image in the background
+        run: nohup docker pull "$POSTGRES_IMAGE" > /tmp/postgres-pull.log 2>&1 &
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -34,7 +47,11 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+      - name: Wait for the PostgreSQL test image
+        run: docker pull "$POSTGRES_IMAGE"
+
       # Includes the architecture tests, which fail the build if a crate
-      # reaches across a module boundary. See crates/architecture-tests.
+      # reaches across a module boundary, and the database suites, which run
+      # against a PostgreSQL container of their own. See crates/architecture-tests.
       - name: Test
         run: cargo test --workspace --all-targets
