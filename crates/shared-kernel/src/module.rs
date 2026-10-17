@@ -79,6 +79,7 @@ pub struct Services {
     rate_limiters: BTreeMap<&'static str, RateLimiter>,
     authenticator: Option<Arc<dyn Authenticator>>,
     policies: Option<Arc<dyn PolicyEvaluator>>,
+    dispatchers: Vec<OutboxDispatcher>,
 }
 
 impl std::fmt::Debug for Services {
@@ -125,6 +126,7 @@ impl Services {
             rate_limiters: BTreeMap::new(),
             authenticator: None,
             policies: None,
+            dispatchers: Vec::new(),
         }
     }
 
@@ -350,7 +352,15 @@ impl Services {
         );
 
         self.hosted.push(Arc::new(dispatcher.clone()));
+        self.dispatchers.push(dispatcher.clone());
         dispatcher
+    }
+
+    /// Every outbox dispatcher, so a test can run one batch the way upstream's
+    /// calls `ProcessBatchAsync` on the resolved dispatcher.
+    #[must_use]
+    pub fn outbox_dispatchers(&self) -> &[OutboxDispatcher] {
+        &self.dispatchers
     }
 
     /// Port of `AddAuthentication` + `AddAuthorization`: how callers are

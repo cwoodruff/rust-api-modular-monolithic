@@ -44,3 +44,6 @@ axum-test = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 tower = { workspace = true }
+test-support = { workspace = true }
+identity-contracts = { workspace = true }
+uuid = { workspace = true }

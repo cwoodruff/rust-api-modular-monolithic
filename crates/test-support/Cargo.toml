@@ -1,0 +1,24 @@
+[package]
+name = "test-support"
+description = "Test fixtures: one PostgreSQL server per test process, template databases cloned per host, header-based test authentication."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+shared-kernel = { workspace = true }
+identity-contracts = { workspace = true }
+axum = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+uuid = { workspace = true }

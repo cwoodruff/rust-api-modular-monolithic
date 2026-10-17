@@ -1,0 +1,16 @@
+[package]
+name = "catalog-host"
+description = "Port of samples/Catalog.Host: Catalog alone in a process of its own. Built and tested, never deployed."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+shared-kernel = { workspace = true }
+module-catalog = { workspace = true }

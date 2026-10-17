@@ -92,6 +92,22 @@ impl AppConfig {
     /// Returns [`ConfigError`] if a configuration file exists but cannot be
     /// read or parsed.
     pub fn load_for(content_root: &Path, environment: Environment) -> Result<Self, ConfigError> {
+        Self::load_layers(content_root, environment, true)
+    }
+
+    /// Loads configuration without user secrets: the JSON files and the
+    /// environment only. Tests use it, so a developer's own logins cannot leak
+    /// into what a test expects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if a configuration file exists but cannot be
+    /// read or parsed.
+    pub fn load_without_user_secrets(content_root: &Path, environment: Environment) -> Result<Self, ConfigError> {
+        Self::load_layers(content_root, environment, false)
+    }
+
+    fn load_layers(content_root: &Path, environment: Environment, user_secrets: bool) -> Result<Self, ConfigError> {
         let layers = [
             content_root.join("appsettings.json"),
             content_root.join(format!("appsettings.{}.json", environment.name())),
@@ -108,7 +124,8 @@ impl AppConfig {
         // before the environment, as upstream's host does (4ad3c91). The id is
         // the original's, so `dotnet user-secrets --project
         // src/ModularMonolith.Api set …` seeds this host too.
-        if environment.exposes_operational_metadata()
+        if user_secrets
+            && environment.exposes_operational_metadata()
             && let Some(path) = user_secrets_path()
             && let Some(values) = read_json_layer(&path)?
         {
@@ -121,6 +138,23 @@ impl AppConfig {
             figment,
             environment,
         })
+    }
+
+    /// Lays `overrides` over everything loaded so far — what a test host's
+    /// `ConfigureAppConfiguration` does. Keys may use either form,
+    /// `"ConnectionStrings": { "AppDatabase": … }` or `"ConnectionStrings:AppDatabase"`.
+    #[must_use]
+    pub fn with_overrides(self, overrides: Value) -> Self {
+        Self {
+            figment: self.figment.merge(Serialized::defaults(lowercase_keys(overrides))),
+            environment: self.environment,
+        }
+    }
+
+    /// A configuration made only of `values`, for tests.
+    #[must_use]
+    pub fn from_values(values: Value, environment: Environment) -> Self {
+        Self::from_figment(Figment::new().merge(Serialized::defaults(lowercase_keys(values))), environment)
     }
 
     /// Builds a configuration directly from a figment, for tests and for hosts

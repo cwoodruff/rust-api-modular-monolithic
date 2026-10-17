@@ -148,6 +148,20 @@ impl Host {
         self.router.clone()
     }
 
+    /// Runs one batch of every outbox dispatcher, returning how many rows they
+    /// looked at — what upstream's tests do instead of waiting on the poll.
+    ///
+    /// # Errors
+    ///
+    /// The first batch the database refuses.
+    pub async fn dispatch_outbox_once(&self) -> Result<usize, sqlx::Error> {
+        let mut processed = 0;
+        for dispatcher in self.services.outbox_dispatchers() {
+            processed += dispatcher.process_batch().await?;
+        }
+        Ok(processed)
+    }
+
     /// Starts the dispatchers, work queues and jobs the modules registered.
     #[must_use]
     pub fn start_hosted_services(&self) -> RunningServices {
